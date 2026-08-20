@@ -1,0 +1,48 @@
+# Public-repository allowlist
+#
+# Ignore every top-level working-project item, then explicitly allow only the
+# public reproducibility package. This is safer than trying to enumerate every
+# current and future private folder.
+/*
+
+# Root repository and environment files
+!/.gitignore
+!/.Rprofile
+!/README.md
+!/renv.lock
+!/LICENSE
+!/LICENSE.*
+!/CITATION.cff
+!/*.Rproj
+
+# Public data, code, saved models, and generated results
+!/analysis_data/
+!/analysis_scripts/
+!/model_outputs/
+!/results/
+
+# Standard renv bootstrap files only. Never commit the installed library.
+!/renv/
+/renv/*
+!/renv/.gitignore
+!/renv/activate.R
+!/renv/settings.json
+
+# Optional public folders are excluded until deliberately enabled.
+# Remove the leading "# " from a line when that folder belongs in the deposit.
+# !/acquisition_materials/
+# !/writeup/
+
+# Caches and operating-system files inside otherwise public folders
+**/.Rproj.user/
+**/.quarto/
+**/*_cache/
+**/.DS_Store
+**/Thumbs.db
+**/.venv/
+**/__pycache__/
+**/node_modules/
+
+# One-time deposit packages should not become a second working tree
+**/*.zip
+**/*.7z

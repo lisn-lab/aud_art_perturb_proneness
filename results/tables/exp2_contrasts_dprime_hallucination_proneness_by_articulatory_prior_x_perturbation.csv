@@ -1,0 +1,7 @@
+"Self_Voice","Perturbation","contrast","estimate","lower.HPD","upper.HPD"
+"Distorted","Art. Suppression","Higher - Lower Proneness",-0.354453798166715,-0.642436471016313,-0.0717728954180688
+"Self-Voice","Art. Suppression","Higher - Lower Proneness",0.384824393858688,0.113425774069507,0.696157433395336
+"Distorted","None","Higher - Lower Proneness",-0.0654580059812966,-0.342799083447021,0.219809152475896
+"Self-Voice","None","Higher - Lower Proneness",0.209408500328514,-0.0615368434238217,0.50405373956266
+"Distorted","Foot-Tapping","Higher - Lower Proneness",-0.232381595173836,-0.523523772240448,0.0529430097145075
+"Self-Voice","Foot-Tapping","Higher - Lower Proneness",0.164277611267604,-0.126824559118068,0.450270014309948

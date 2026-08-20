@@ -1,0 +1,5 @@
+"fam","lshs","emmean","lower.HPD","upper.HPD"
+"Weak Prior","Lower Proneness (-1SD)",-0.0165953290000001,-0.334390889,0.3126908365
+"Strong Prior","Lower Proneness (-1SD)",-0.03083345275,-0.3358954075,0.295133867
+"Weak Prior","Higher Proneness (+1SD)",-0.23173291645,-0.5704110895,0.0720103575
+"Strong Prior","Higher Proneness (+1SD)",0.54533053375,0.23149522,0.8596576725

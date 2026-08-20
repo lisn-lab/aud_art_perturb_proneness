@@ -1,0 +1,9 @@
+"fam","musicvivid","emmean","lower.HPD","upper.HPD"
+"Weak Prior","No
+Imagery",-0.1682635675,-0.414455346,0.0778858575
+"Strong Prior","No
+Imagery",0.0306068324999999,-0.196377996,0.2588445175
+"Weak Prior","Music
+Imagery",-0.0809826357900002,-0.326493466,0.1884878975
+"Strong Prior","Music
+Imagery",0.490434819,0.2652737025,0.72111348

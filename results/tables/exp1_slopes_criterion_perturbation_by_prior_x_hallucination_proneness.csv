@@ -1,0 +1,5 @@
+"Prior","Hallucination_Proneness","musicvivid.trend","lower.HPD","upper.HPD"
+"Weak Prior","Lower Proneness (-1SD)",-0.136783040073333,-0.543892708230896,0.282076399160245
+"Strong Prior","Lower Proneness (-1SD)",0.121655916906161,-0.27818673408276,0.508280618184459
+"Weak Prior","Higher Proneness (+1SD)",0.128749945516977,-0.199486964402933,0.452727569112695
+"Strong Prior","Higher Proneness (+1SD)",-0.272612404300364,-0.669693148074065,0.0913206949474717

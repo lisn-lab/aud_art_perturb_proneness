@@ -1,0 +1,17 @@
+"fam","musicvivid","lshs","emmean","lower.HPD","upper.HPD"
+"Weak Prior","No
+Imagery","Higher Proneness (+1SD)",0.344842488407325,0.0475870224813251,0.678541005712325
+"Strong Prior","No
+Imagery","Higher Proneness (+1SD)",0.322471420003475,0.0226028324628498,0.6239979331367
+"Weak Prior","Music
+Imagery","Higher Proneness (+1SD)",0.479207049392863,0.193534202139455,0.763232656513463
+"Strong Prior","Music
+Imagery","Higher Proneness (+1SD)",0.0487868331980252,-0.312463969378438,0.370872862475325
+"Weak Prior","No
+Imagery","Lower Proneness (-1SD)",0.2598825102018,-0.081915593730125,0.55580727811105
+"Strong Prior","No
+Imagery","Lower Proneness (-1SD)",0.378672628440775,0.07760516405015,0.747279393152225
+"Weak Prior","Music
+Imagery","Lower Proneness (-1SD)",0.125855033619187,-0.217816386747675,0.464536221341675
+"Strong Prior","Music
+Imagery","Lower Proneness (-1SD)",0.503409772879321,0.218219886414875,0.82311373338305

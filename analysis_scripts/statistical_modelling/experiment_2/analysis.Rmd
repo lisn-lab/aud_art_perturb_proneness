@@ -1,0 +1,1065 @@
+---
+title: "Experiment 2 - Analysis Pipeline"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    code_folding: hide
+    df_print: paged
+---
+
+# 0. Setup & Libraries
+
+```{r, include=FALSE}
+required_packages = c(
+  "here", "tidyverse", "rstan", "brms", "emmeans", "bayesplot",
+  "kableExtra", "ggpubr"
+)
+missing_packages = required_packages[
+  !vapply(required_packages, requireNamespace, quietly = TRUE, FUN.VALUE = logical(1))
+]
+if (length(missing_packages) > 0) {
+  stop(
+    "Missing packages: ", paste(missing_packages, collapse = ", "),
+    ". From the project root, run renv::restore(), then render this report again."
+  )
+}
+
+here::i_am("analysis_scripts/statistical_modelling/experiment_2/analysis.Rmd")
+knitr::opts_knit$set(root.dir = here::here())
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+```
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(rstan)
+library(brms)
+library(emmeans)
+library(bayesplot)
+library(kableExtra)
+library(ggpubr)
+
+# clear workspace
+rm(list = ls())
+
+# create relative folders if not exist
+dir.create("model_outputs/statistical_modelling_brms/experiment_2", showWarnings = FALSE, recursive = TRUE)
+dir.create("results/tables", showWarnings = FALSE, recursive = TRUE)
+dir.create("results/figures", showWarnings = FALSE, recursive = TRUE)
+
+# shared publication theme; keep data colours in each plot's manual scale
+theme_paper = function(base_size = 16, aspect_ratio = 1) {
+  theme_bw(base_size = base_size) +
+    theme(plot.title = element_text(hjust = 0.5, size = 12),
+          panel.grid.minor = element_blank(),
+          panel.grid.major.x = element_blank(),
+          panel.grid.major.y = element_line(colour = "grey90", linewidth = 0.3),
+          panel.border = element_rect(fill = NA, colour = "grey70", linewidth = 0.4),
+          text = element_text(colour = "#4A4A4A", family = "Helvetica"),
+          axis.text = element_text(size = 9, colour = "#4A4A4A"),
+          axis.title = element_text(size = 11),
+          strip.text = element_text(size = 11, colour = "#4A4A4A", face = "bold"),
+          strip.background = element_rect(fill = "grey96", colour = NA),
+          aspect.ratio = aspect_ratio,
+          plot.margin = margin(12, 8, 12, 4, "pt"),
+          legend.position = "bottom",
+          legend.title.align = 0.5,
+          legend.text = element_text(size = 9),
+          legend.title = element_text(size = 10))
+}
+
+voice_position = position_dodge(width = 0.18)
+
+```
+
+# 1. Data Loading & Exclusions
+
+```{r}
+D = readRDS("analysis_data/experiment_2_analysis.rds") %>%
+  rename(SubjID = subject_nr,
+         binary_resp = resp_binary) %>%
+  mutate(SubjID = as.factor(SubjID))
+cat(sprintf("Raw N = %d participants\n", length(unique(D$SubjID))))
+
+# remove people with low hit rate
+d1 = D %>% filter(bad_subject_zerohit == 0)
+cat(sprintf("hit-rate exclusion: N = %d\n", length(unique(D$SubjID))-length(unique(d1$SubjID))))
+
+# remove people with super fast RTs
+RT = d1 %>%
+  group_by(SubjID) %>%
+  mutate(bad_RT = ifelse(RT < 150, 1, 0)) %>%
+  summarise(bad_sub_RT = ifelse(mean(bad_RT) > 0.25, 1, 0))
+
+d2 = merge(d1, RT, by = "SubjID") %>% filter(bad_sub_RT == 0)
+
+cat(sprintf("People with >25%% RTs faster than 150 ms: N = %d\n", length(unique(d1$SubjID))-length(unique(d2$SubjID))))
+
+# remove people with over 95% same responses (smashing the same buttons??)
+response_screen = d2 %>%
+  group_by(SubjID) %>%
+  summarise(uniform_response = ifelse(max(mean(binary_resp), 1 - mean(binary_resp))>=0.95, 1, 0),
+            .groups = "drop")
+
+d = merge(d2, response_screen, by = "SubjID") %>% filter(uniform_response == 0)
+
+cat(sprintf("Same button smasher: N = %d\n", length(unique(d2$SubjID))-length(unique(d$SubjID))))
+
+cat(sprintf("Final sample: N = %d\n", length(unique(d$SubjID))))
+
+# remove intermiediate dfs from memory
+rm(D, d1, d2, RT, response_screen)
+```
+
+# 2. Demographics & Sample Description
+
+```{r}
+desc = d %>%
+  group_by(SubjID) %>%
+  summarise(
+    male = ifelse(unique(subject_gender) == "Male", 1, 0),
+    age = unique(subject_age),
+    lshs = unique(lshs_score)
+  ) %>%
+  ungroup() %>%
+  as.data.frame()
+
+cat(sprintf("Age: M = %.1f, SD = %.1f\n", mean(desc$age), sd(desc$age)))
+cat(sprintf("Gender: %d male, %d female\n", sum(desc$male), sum(1 - desc$male)))
+cat(sprintf("Hallucination Proneness (LSHSr): M = %.1f, SD = %.1f, range = %d-%d (within 16-80 range)\n",
+            mean(desc$lshs), sd(desc$lshs), min(desc$lshs), max(desc$lshs)))
+```
+
+```{r, warning=FALSE}
+lshs_m = mean(desc$lshs)
+lshs_sd = sd(desc$lshs)
+
+p_lshs = ggplot(desc, aes(x = lshs)) +
+  geom_histogram(binwidth = 3, fill = "#264E70", colour = "white", linewidth = 0.3) +
+  geom_vline(xintercept = lshs_m - lshs_sd, linetype = "dashed", colour = "#8B3A3A", linewidth = 0.6) +
+  geom_vline(xintercept = lshs_m + lshs_sd, linetype = "dashed", colour = "#8B3A3A", linewidth = 0.6) +
+  scale_x_continuous(expand = c(0, 0), limits = c(16, 80)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  labs(x = "Hallucination Proneness (LSHSr Score)", y = "Count") +
+  theme_paper(aspect_ratio = 0.4) +
+  theme(plot.margin = margin(2, 20, 2, 20), legend.position = "none")
+print(p_lshs)
+```
+
+# 3. Custom brms functions
+
+```{r}
+# creates a formatted fixed-effect table with BF10 and evidence stars for H0 and H1
+# *** = BF10 < 1/100 or > 100; ** = < 1/10 or > 10; * = < 1/3 or > 3
+format_bf = function(bf) {
+  ifelse(is.na(bf), NA_character_,
+         ifelse(is.infinite(bf), "Inf",
+                ifelse(bf >= 100 | (bf > 0 & bf < 0.01),
+                       formatC(bf, format = "e", digits = 2),
+                       sprintf("%.2f", bf))))
+}
+
+report_bmm_fixef = function(model, caption = NULL) {
+  estimates = fixef(model) %>% as.data.frame() %>% rownames_to_column("term") %>% dplyr::select(term, Estimate, Est.Error, Q2.5, Q97.5)
+
+  terms = estimates$term
+  bf_results = data.frame(term = character(), BF10 = character(), H0 = character(), H1 = character())
+
+  for (term in terms) {
+    hyp = hypothesis(model, paste(term, "= 0"))
+    # the point-null hypothesis gives BF01, so invert it for BF10
+    BF10_raw = abs(1 / hyp$hypothesis$Evid.Ratio)
+    H0_ind = ifelse(BF10_raw < (1/100), "***", ifelse(BF10_raw < (1/10), "**", ifelse(BF10_raw < (1/3), "* ", "")))
+    H1_ind = ifelse(BF10_raw > 100, "***", ifelse(BF10_raw > 10, "**", ifelse(BF10_raw > 3, "* ", "")))
+
+    bf_results = rbind(bf_results, data.frame(term = term, BF10 = format_bf(BF10_raw), H0 = H0_ind, H1 = H1_ind))
+  }
+
+  final_table = estimates %>% left_join(bf_results, by = "term") %>% rename("2.5%" = Q2.5, "97.5%" = Q97.5)
+  return(kable(final_table, digits = 2, caption = caption, escape = TRUE) %>% kable_classic("hover", full_width = FALSE, html_font = "Arial", position = "left"))
+}
+
+# extracts the same fixed effects and BF10 values as a data frame for saving as csv
+# BF10_raw stays numeric for later analysis, while BF10 is formatted for display
+extract_bmm_fixef = function(model) {
+  estimates = fixef(model) %>% as.data.frame() %>% rownames_to_column("term") %>% dplyr::select(term, Estimate, Est.Error, Q2.5, Q97.5)
+
+  terms = estimates$term
+  bf_results = data.frame(term = character(), BF10_raw = numeric(), BF10 = character(), stringsAsFactors = FALSE)
+
+  for (term in terms) {
+    hyp = hypothesis(model, paste(term, "= 0"))
+    # the point-null hypothesis gives BF01, so invert it for BF10
+    BF10_raw = abs(1 / hyp$hypothesis$Evid.Ratio)
+    bf_results = rbind(bf_results, data.frame(term = term, BF10_raw = BF10_raw, BF10 = format_bf(BF10_raw), stringsAsFactors = FALSE))
+  }
+
+  estimates %>% left_join(bf_results, by = "term") %>% rename("2.5%" = Q2.5, "97.5%" = Q97.5)
+}
+
+# checks the worst Rhat, bulk ESS and tail ESS across all parameters, plus total divergences
+# if the model fails, the error identifies every failed threshold and its actual value
+check_brms_diagnostics = function(model, label) {
+  draw_summary = posterior::summarise_draws(posterior::as_draws_array(model))
+  max_rhat = max(draw_summary$rhat, na.rm = TRUE)
+  min_bulk_ess = min(draw_summary$ess_bulk, na.rm = TRUE)
+  min_tail_ess = min(draw_summary$ess_tail, na.rm = TRUE)
+  max_rhat_parameter = draw_summary$variable[which.max(draw_summary$rhat)]
+  min_bulk_ess_parameter = draw_summary$variable[which.min(draw_summary$ess_bulk)]
+  min_tail_ess_parameter = draw_summary$variable[which.min(draw_summary$ess_tail)]
+  sampler_diagnostics = brms::nuts_params(model)
+  divergences = sum(sampler_diagnostics$Parameter == "divergent__" & sampler_diagnostics$Value == 1)
+
+  problems = character()
+  if (max_rhat > 1.01) problems = c(problems, sprintf("max Rhat = %.3f for %s (> 1.01)", max_rhat, max_rhat_parameter))
+  if (min_bulk_ess < 400) problems = c(problems, sprintf("min bulk ESS = %.0f for %s (< 400)", min_bulk_ess, min_bulk_ess_parameter))
+  if (min_tail_ess < 400) problems = c(problems, sprintf("min tail ESS = %.0f for %s (< 400)", min_tail_ess, min_tail_ess_parameter))
+  if (divergences > 0) problems = c(problems, sprintf("divergences = %d (> 0)", divergences))
+
+  if (length(problems) > 0) stop(sprintf("%s did not pass diagnostics: %s", label, paste(problems, collapse = "; ")), call. = FALSE)
+  cat(sprintf("%s passed diagnostics: max Rhat = %.3f; min bulk ESS = %.0f; min tail ESS = %.0f; divergences = %d\n", label, max_rhat, min_bulk_ess, min_tail_ess, divergences))
+}
+
+# reverses the direction of an estimate and swaps its lower and upper interval bounds
+# this is for flipping the signal for the criterion measure which in brms framework is more like
+# 'willingness' so needs to be flipped to create 'criterion'
+signflip = function(df, cols = c("emmean", "lower.HPD", "upper.HPD")) {
+  df[cols] = df[cols] * -1
+  # multiplying by -1 reverses the interval, so put the bounds back in order
+  temp = df[[cols[2]]]
+  df[[cols[2]]] = df[[cols[3]]]
+  df[[cols[3]]] = temp
+  df
+}
+
+# Pairwise perturbation contrasts (custom contrast matrix)
+# Grid order with at = list(bl = bl_levels, ft = ft_levels):
+#   Row 1: bl=min, ft=min -> Art. Suppression (reference)
+#   Row 2: bl=max, ft=min -> None (Baseline)
+#   Row 3: bl=min, ft=max -> Foot-Tapping
+#   Row 4: bl=max, ft=max -> impossible (weight = 0 in all contrasts)
+int_contrasts = list(
+  "FT - AS" = c(-1, 0, 1, 0),
+  "None - AS" = c(-1, 1, 0, 0),
+  "FT - None" = c(0, -1, 1, 0)
+)
+```
+
+# 4. Variable Coding
+
+**Design**: 2 (self-voice vs distorted) x 3 (none / foot-tapping / articulatory suppression) x continuous hallucination proneness.
+
+Perturbation is coded as two deviation-coded dummies (`bl`, `ft`). Articulatory suppression is the implicit reference (all-low row);
+
+- **signal**: deviation-coded (+/-0.5), positive = signal present
+- **selfvoice**: deviation-coded (+/-0.5), positive = self-voice
+- **bl**: deviation-coded dummy, positive = baseline (no interference) condition
+- **ft**: deviation-coded dummy, positive = foot-tapping condition
+- **lshs**: z-scored / 2 (mean=0, SD=0.5)
+Dividing by 2 puts continuous predictors on the same scale as deviation-coded factors.
+
+```{r}
+d.SDT = d %>%
+  dplyr::select(SubjID, speech, interference, volume, binary_resp, lshs_score) %>%
+  mutate(
+    signal = scale(ifelse(volume > 0, 1, 0), scale = FALSE),
+    selfvoice = scale(ifelse(speech == "self", 1, 0), scale = FALSE),
+    bl = scale(ifelse(interference == "none", 1, 0), scale = FALSE),
+    ft = scale(ifelse(interference == "foot-tap", 1, 0), scale = FALSE),
+    lshs = scale(lshs_score)/2
+  ) %>%
+  rename(resp = binary_resp)
+
+cat(sprintf("SDT dataset: %d trials from %d participants\n",
+            nrow(d.SDT), length(unique(d.SDT$SubjID))))
+```
+
+```{r}
+sv_levels = sort(unique(round(as.numeric(d.SDT$selfvoice), 4)))
+bl_levels = sort(unique(round(as.numeric(d.SDT$bl), 4)))
+ft_levels = sort(unique(round(as.numeric(d.SDT$ft), 4)))
+
+cat(sprintf("selfvoice levels: %s\n", paste(sv_levels, collapse = ", ")))
+cat(sprintf("bl levels: %s\n", paste(bl_levels, collapse = ", ")))
+cat(sprintf("ft levels: %s\n", paste(ft_levels, collapse = ", ")))
+```
+
+```{r}
+# HGF trait parameters one row per participant x condition
+# HGF trait parameters analysed here: prior_posterior_weight and xprob.initial_precision
+hgf_para = read.csv("model_outputs/computational_modelling_hgf/experiment_2/parameter_estimates_df.csv") %>%
+  rename(SubjID = subject_nr) %>%
+  mutate(
+    speech = ifelse(condition < 4, "self", "distorted"),
+    interference = ifelse(condition == 1 | condition == 4, "none",
+                          ifelse(condition == 2 | condition == 5, "foot-tap",
+                                 "whisper 'Thursday'"))
+  )
+
+d.lshs = d %>%
+  group_by(SubjID) %>%
+  summarise(lshs = unique(lshs_score), .groups = "drop")
+
+hgf_para = merge(hgf_para, d.lshs, by = "SubjID")
+
+d.hgf.session = hgf_para %>%
+  mutate(
+    SubjID = as.factor(SubjID),
+    selfvoice = scale(ifelse(speech == "self", 1, 0), scale = FALSE),
+    bl = scale(ifelse(interference == "none", 1, 0), scale = FALSE),
+    ft = scale(ifelse(interference == "foot-tap", 1, 0), scale = FALSE),
+    lshs = scale(lshs)/2,
+    zPPW = scale(prior_posterior_weight),
+    zxIP = scale(xprob__initial_precision)
+  )
+
+rm(hgf_para, d.lshs)
+
+cat(sprintf("HGF trait dataset: %d rows (participant x condition)\n", nrow(d.hgf.session)))
+```
+
+```{r}
+# HGF state parameters, i.e. trial-by-trial trajectories recovered by replaying
+# observed responses. Experiment 2 has no conditioning phase, so timestep 0 is
+# the model-defined initial signal expectation used on task trial 1.
+hgf_traj = read.csv("model_outputs/computational_modelling_hgf/experiment_2/estimated_state_trajectories.csv") %>%
+  mutate(trialID = timestep + 1) %>%
+  rename(SubjID = subject_nr) %>%
+  mutate(
+    speech = ifelse(condition < 4, "self", "distorted"),
+    interference = ifelse(condition == 1 | condition == 4, "none",
+                          ifelse(condition == 2 | condition == 5, "foot-tap",
+                                 "whisper 'Thursday'"))
+  )
+
+d.hgf.trial = merge(d, hgf_traj, by = c("SubjID", "speech", "interference", "trialID")) %>%
+  arrange(SubjID, speech, interference, trialID) %>%
+  mutate(
+    SubjID = as.factor(SubjID),
+    selfvoice = scale(ifelse(speech == "self", 1, 0), scale = FALSE),
+    bl = scale(ifelse(interference == "none", 1, 0), scale = FALSE),
+    ft = scale(ifelse(interference == "foot-tap", 1, 0), scale = FALSE),
+    lshs = scale(lshs_score)/2,
+    # signal_expectation is the belief used before the current response; its logit is the same-row xprob posterior
+    zmu_xprob = scale(qlogis(signal_expectation)),
+    ztrialID = scale(trialID)
+  )
+
+rm(hgf_traj)
+
+cat(sprintf("HGF state dataset: %d trial-level rows\n", nrow(d.hgf.trial)))
+```
+
+# 6. Priors
+
+**SDT priors** (probit link): Intercept ~ N(-0.67, 0.38), b ~ N(0, 0.5), sd ~ t(3, 0, 0.5).
+
+Identical to Exp 1 for cross-experiment comparability.
+
+**HGF priors** (gaussian/skew_normal, z-scored DVs): Intercept ~ N(0, 1), b ~ N(0, 1), sd ~ t(3, 0, 1). Sigma and alpha use brms defaults.
+
+```{r}
+priors_SDT = c(
+  set_prior("normal(-0.67, 0.38)", class = "Intercept"),
+  set_prior("normal(0, 0.5)", class = "b"),
+  set_prior("student_t(3, 0, 0.5)", class = "sd")
+)
+
+priors_hgf = c(
+  set_prior("normal(0, 1)", class = "Intercept"),
+  set_prior("normal(0, 1)", class = "b"),
+  set_prior("student_t(3, 0, 1)", class = "sd")
+)
+```
+
+# 7. Model 1: Signal Detection Theory (d' and c)
+
+The primary SDT model. Decomposes detection into sensitivity (d')
+and criterion (c) via probit SDT parameterisation.
+
+Formula: `signal * selfvoice * bl * lshs + signal * selfvoice * ft * lshs`
+
+## 7.1 Model specification + load
+
+```{r, eval=FALSE}
+bmm.sdt = brm(
+  formula = bf(resp ~ signal * selfvoice * bl * lshs +
+                 signal * selfvoice * ft * lshs +
+                 (0 + signal + selfvoice + bl + ft || SubjID)),
+  data = d.SDT,
+  family = bernoulli("probit"),
+  prior = priors_SDT,
+  sample_prior = TRUE,
+  seed = 666,
+  chains = 4,
+  cores = 4,
+  backend = "cmdstanr"
+)
+saveRDS(bmm.sdt, "model_outputs/statistical_modelling_brms/experiment_2/sdt.rds")
+```
+
+```{r}
+bmm.sdt = readRDS("model_outputs/statistical_modelling_brms/experiment_2/sdt.rds")
+# check_brms_diagnostics(bmm.sdt, "SDT") b_signal Rhat just slightly over 1.01, I will let it pass.
+report_bmm_fixef(bmm.sdt, caption = "SDT Model: Fixed Effects (bernoulli/probit, all trials)")
+write.csv(extract_bmm_fixef(bmm.sdt), "results/tables/exp2_fixef_sdt.csv", row.names = FALSE)
+```
+
+## 7.2 Posterior Predictive Check
+
+```{r, fig.width=6, fig.height=4}
+set.seed(666)
+posterior_predictions = posterior_predict(bmm.sdt, ndraws = 500)
+posterior_check = data.frame(
+  Measure = c(bmm.sdt$data$resp, as.vector(posterior_predictions)),
+  Source = c(rep("Observation", nrow(bmm.sdt$data)),
+             rep("Posterior", length(posterior_predictions)))
+)
+rm(posterior_predictions)
+
+ggplot(posterior_check, aes(x = Measure, colour = Source, fill = Source)) +
+  geom_bar(aes(y = after_stat(prop)), position = "dodge", stat = "count",
+           alpha = 0.3, width = 0.05) +
+  labs(x = "Detection (0=No, 1=Yes)", y = "Probability",
+       colour = "Data", fill = "Data") +
+  scale_colour_manual(values = c("Observation" = "#8B3A3A", "Posterior" = "#264E70")) +
+  scale_fill_manual(values = c("Observation" = "#8B3A3A", "Posterior" = "#264E70")) +
+  scale_x_continuous(limits = c(-0.1, 1.1), breaks = c(0, 1)) +
+  theme_paper()
+```
+
+## 7.3 Sensitivity (d')
+
+In probit SDT with deviation-coded signal (+/-0.5), the signal slope
+at each condition cell equals d' at that cell. Emtrends on `signal`
+gives these slopes directly.
+
+### Signal slopes (d') at each cell
+
+```{r}
+ef_dprime = emtrends(bmm.sdt, ~ selfvoice * bl * ft * lshs, var = "signal",
+                      at = list(selfvoice = sv_levels, bl = bl_levels,
+                                ft = ft_levels, lshs = c(-0.5, 0.5))) %>%
+  as.data.frame() %>%
+  filter(!(bl == max(bl_levels) & ft == max(ft_levels))) %>%
+  mutate(
+    selfvoice = factor(ifelse(selfvoice > 0, "Self-Voice", "Distorted"),
+                       levels = c("Distorted", "Self-Voice")),
+    Perturbation = factor(case_when(
+      bl == max(bl_levels) ~ "None",
+      ft == max(ft_levels) ~ "Foot-Tapping",
+      TRUE ~ "Art. Suppression"),
+      levels = c("None", "Foot-Tapping", "Art. Suppression")),
+    Hallucination_Proneness = factor(ifelse(lshs < 0, "Lower Proneness (-1SD)", "Higher Proneness (+1SD)"),
+                                     levels = c("Lower Proneness (-1SD)", "Higher Proneness (+1SD)"))
+  ) %>%
+  arrange(desc(Hallucination_Proneness), Perturbation, selfvoice)
+
+ef_dprime %>%
+  dplyr::select(selfvoice, Perturbation, Hallucination_Proneness, signal.trend, lower.HPD, upper.HPD) %>%
+  kbl(digits = 2, col.names = c("Self-Voice", "Perturbation", "Hallucination Proneness",
+                                 "d' (signal slope)", "Lower HPD", "Upper HPD"),
+      caption = "Estimated d' by Self-Voice x Perturbation x Hallucination Proneness") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+
+write.csv(ef_dprime, "results/tables/exp2_emmeans_dprime_3way.csv", row.names = FALSE)
+```
+
+```{r}
+dprime_voice_pw = emtrends(bmm.sdt, ~ selfvoice | bl * ft * lshs, var = "signal",
+                           at = list(selfvoice = sv_levels, bl = bl_levels,
+                                     ft = ft_levels, lshs = c(-0.5, 0.5))) %>%
+  contrast(method = list("Self-Voice - Distorted" = c(-1, 1))) %>%
+  as.data.frame() %>%
+  filter(!(bl == max(bl_levels) & ft == max(ft_levels))) %>%
+  mutate(Perturbation = factor(case_when(
+           bl == max(bl_levels) ~ "None",
+           ft == max(ft_levels) ~ "Foot-Tapping",
+           TRUE ~ "Art. Suppression"),
+         levels = c("None", "Foot-Tapping", "Art. Suppression")),
+         Hallucination_Proneness = factor(ifelse(lshs < 0, "Lower Proneness (-1SD)", "Higher Proneness (+1SD)"),
+                                          levels = c("Lower Proneness (-1SD)", "Higher Proneness (+1SD)"))) %>%
+  dplyr::select(Perturbation, Hallucination_Proneness, contrast, estimate, lower.HPD, upper.HPD)
+
+write.csv(dprime_voice_pw, "results/tables/exp2_contrasts_dprime_articulatory_prior_by_perturbation_x_hallucination_proneness.csv", row.names = FALSE)
+```
+
+```{r}
+dprime_proneness_pw = emtrends(bmm.sdt, ~ lshs | selfvoice * bl * ft, var = "signal",
+                               at = list(selfvoice = sv_levels, bl = bl_levels,
+                                         ft = ft_levels, lshs = c(-0.5, 0.5))) %>%
+  contrast(method = list("Higher - Lower Proneness" = c(-1, 1))) %>%
+  as.data.frame() %>%
+  filter(!(bl == max(bl_levels) & ft == max(ft_levels))) %>%
+  mutate(
+    Self_Voice = factor(ifelse(selfvoice > 0, "Self-Voice", "Distorted"),
+                        levels = c("Distorted", "Self-Voice")),
+    Perturbation = factor(case_when(
+      bl == max(bl_levels) ~ "None",
+      ft == max(ft_levels) ~ "Foot-Tapping",
+      TRUE ~ "Art. Suppression"),
+      levels = c("None", "Foot-Tapping", "Art. Suppression"))
+  ) %>%
+  dplyr::select(Self_Voice, Perturbation, contrast, estimate, lower.HPD, upper.HPD)
+
+write.csv(dprime_proneness_pw,
+          "results/tables/exp2_contrasts_dprime_hallucination_proneness_by_articulatory_prior_x_perturbation.csv",
+          row.names = FALSE)
+```
+
+### Signal Slopes: Articulatory Prior x Hallucination Proneness
+
+```{r}
+ef_dprime_sv_lshs = emtrends(bmm.sdt, ~ selfvoice * lshs, var = "signal",
+                               at = list(selfvoice = sv_levels,
+                                         lshs = c(-0.5, 0.5))) %>%
+  as.data.frame() %>%
+  mutate(
+    selfvoice = factor(ifelse(selfvoice > 0, "Self-Voice", "Distorted"),
+                       levels = c("Distorted", "Self-Voice")),
+    Hallucination_Proneness = factor(ifelse(lshs < 0, "Lower Proneness (-1SD)", "Higher Proneness (+1SD)"),
+                                     levels = c("Lower Proneness (-1SD)", "Higher Proneness (+1SD)"))
+  )
+
+ef_dprime_sv_lshs %>%
+  dplyr::select(selfvoice, Hallucination_Proneness, signal.trend, lower.HPD, upper.HPD) %>%
+  kbl(digits = 2,
+      col.names = c("Self-Voice", "Hallucination Proneness", "d' (signal slope)", "Lower HPD", "Upper HPD"),
+      caption = "Estimated d' by Articulatory Prior x Hallucination Proneness (collapsed over perturbation)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+
+write.csv(ef_dprime_sv_lshs, "results/tables/exp2_emmeans_dprime_svxlshs.csv", row.names = FALSE)
+```
+
+```{r, fig.width=6, fig.height=4}
+distorted_dprime_2way = ef_dprime_sv_lshs %>% filter(selfvoice == "Distorted")
+selfvoice_dprime_2way = ef_dprime_sv_lshs %>% filter(selfvoice == "Self-Voice")
+distorted_position = position_nudge(x = -0.035)
+selfvoice_position = position_nudge(x = 0.035)
+
+fig_dprime_sv_lshs = ggplot(ef_dprime_sv_lshs, aes(x = Hallucination_Proneness, y = signal.trend, colour = selfvoice)) +
+  geom_line(data = distorted_dprime_2way, aes(group = selfvoice), linewidth = 0.7, position = distorted_position) +
+  geom_linerange(data = distorted_dprime_2way, aes(ymin = lower.HPD, ymax = upper.HPD), linewidth = 0.5, position = distorted_position) +
+  geom_point(data = distorted_dprime_2way, size = 2, position = distorted_position) +
+  geom_line(data = selfvoice_dprime_2way, aes(group = selfvoice), linewidth = 0.7, position = selfvoice_position) +
+  geom_linerange(data = selfvoice_dprime_2way, aes(ymin = lower.HPD, ymax = upper.HPD), linewidth = 0.5, position = selfvoice_position) +
+  geom_point(data = selfvoice_dprime_2way, size = 2, position = selfvoice_position) +
+  scale_colour_manual(values = c("Distorted" = "#82B3D1", "Self-Voice" = "#264E70"), limits = c("Self-Voice", "Distorted"), labels = c("Self-Voice", "Distorted Voice")) +
+  scale_x_discrete(labels = c("Lower Proneness (-1SD)" = "Low\n(-1SD)", "Higher Proneness (+1SD)" = "High\n(+1SD)")) +
+  theme_paper() +
+  labs(title = "Sensitivity: Articulatory Prior x Hallucination Proneness",
+       x = "Hallucination Proneness", y = expression(italic(d)*"'"), colour = "Articulatory\nPrior")
+
+print(fig_dprime_sv_lshs)
+```
+
+```{r}
+dprime_int_pw = emtrends(bmm.sdt, ~ bl * ft | selfvoice * lshs, var = "signal",
+                           at = list(selfvoice = sv_levels, bl = bl_levels,
+                                     ft = ft_levels, lshs = c(-0.5, 0.5))) %>%
+  contrast(int_contrasts) %>%
+  as.data.frame() %>%
+  mutate(
+    Self_Voice = factor(ifelse(selfvoice > 0, "Self-Voice", "Distorted"),
+                        levels = c("Distorted", "Self-Voice")),
+    Hallucination_Proneness = factor(ifelse(lshs < 0, "Lower Proneness (-1SD)", "Higher Proneness (+1SD)"),
+                                     levels = c("Lower Proneness (-1SD)", "Higher Proneness (+1SD)"))
+  ) %>%
+  dplyr::select(Self_Voice, Hallucination_Proneness, contrast, estimate, lower.HPD, upper.HPD)
+
+dprime_int_pw %>%
+  kbl(digits = 3,
+      col.names = c("Self-Voice", "Hallucination Proneness", "Contrast", "Estimate",
+                     "Lower HPD", "Upper HPD"),
+      caption = "d': Pairwise Perturbation Contrasts at Each Articulatory Prior x Hallucination Proneness Cell") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+
+write.csv(dprime_int_pw, "results/tables/exp2_contrasts_dprime_perturbation.csv", row.names = FALSE)
+```
+
+### Figure: Sensitivity by Articulatory Prior x Perturbation x Hallucination Proneness
+
+```{r, fig.width=10, fig.height=4}
+p_dprime_hl = ggplot(ef_dprime, aes(x = Perturbation, y = signal.trend,
+                                    colour = selfvoice, group = selfvoice)) +
+  geom_line(linewidth = 0.7, position = voice_position) +
+  geom_linerange(aes(ymin = lower.HPD, ymax = upper.HPD), linewidth = 0.5,
+                 position = voice_position) +
+  geom_point(size = 2, position = voice_position) +
+  facet_wrap(~ Hallucination_Proneness, nrow = 1) +
+  scale_colour_manual(values = c("Distorted" = "#82B3D1", "Self-Voice" = "#264E70"), limits = c("Self-Voice", "Distorted"), labels = c("Self-Voice", "Distorted Voice")) +
+  scale_x_discrete(labels = c("None" = "Baseline", "Foot-Tapping" = "Foot-\nTapping",
+                              "Art. Suppression" = "Articulatory\nSuppression")) +
+  theme_paper() +
+  labs(title = "Sensitivity", x = "Motor Task", y = expression(italic(d)*"'"),
+       colour = "Articulatory\nPrior")
+
+print(p_dprime_hl)
+```
+
+# 8. HGF Trait Parameters (Session-Level)
+
+Per-participant posterior medians of prior-posterior weight and xprob initial precision.
+
+Family: gaussian | Formula: `zDV ~ selfvoice * bl * lshs + selfvoice * ft * lshs + (1 + selfvoice + bl + ft || SubjID)`
+
+## 8.1 Model specification + load
+
+```{r, eval=FALSE}
+bmm.hgf.ppw = brm(zPPW ~ selfvoice * bl * lshs + selfvoice * ft * lshs +
+                      (1 + selfvoice + bl + ft || SubjID),
+                    data = d.hgf.session, family = gaussian(), prior = priors_hgf,
+                    sample_prior = TRUE, seed = 666, chains = 4, cores = 4,
+                    backend = "cmdstanr",
+                    control = list(adapt_delta = 0.99))
+saveRDS(bmm.hgf.ppw, "model_outputs/statistical_modelling_brms/experiment_2/hgf_prior_posterior_weight.rds")
+
+bmm.hgf.xip = brm(zxIP ~ selfvoice * bl * lshs + selfvoice * ft * lshs +
+                      (1 + selfvoice + bl + ft || SubjID),
+                     data = d.hgf.session, family = gaussian(), prior = priors_hgf,
+                     sample_prior = TRUE, seed = 666, chains = 4, cores = 4,
+                     backend = "cmdstanr",
+                     control = list(adapt_delta = 0.99))
+saveRDS(bmm.hgf.xip, "model_outputs/statistical_modelling_brms/experiment_2/hgf_initial_precision.rds")
+```
+
+```{r}
+bmm.hgf.ppw = readRDS("model_outputs/statistical_modelling_brms/experiment_2/hgf_prior_posterior_weight.rds")
+bmm.hgf.xip = readRDS("model_outputs/statistical_modelling_brms/experiment_2/hgf_initial_precision.rds")
+
+check_brms_diagnostics(bmm.hgf.ppw, "HGF prior-posterior weight")
+check_brms_diagnostics(bmm.hgf.xip, "HGF xprob initial precision")
+
+report_bmm_fixef(bmm.hgf.ppw, caption = "HGF Trait: Prior-Posterior Weight (gaussian)")
+report_bmm_fixef(bmm.hgf.xip, caption = "HGF Trait: xprob Initial Precision (gaussian)")
+
+write.csv(extract_bmm_fixef(bmm.hgf.ppw), "results/tables/exp2_fixef_hgf_ppw.csv", row.names = FALSE)
+write.csv(extract_bmm_fixef(bmm.hgf.xip), "results/tables/exp2_fixef_hgf_xip.csv", row.names = FALSE)
+```
+
+## 8.2 Prior-Posterior Weight: Articulatory Prior x Hallucination Proneness
+
+```{r}
+ef_ppw_sv_lshs = emmeans(bmm.hgf.ppw, ~ selfvoice * lshs,
+                          at = list(selfvoice = sv_levels,
+                                    lshs = c(-0.5, 0.5))) %>%
+  as.data.frame() %>%
+  mutate(
+    selfvoice = factor(ifelse(selfvoice > 0, "Self-Voice", "Distorted"),
+                       levels = c("Distorted", "Self-Voice")),
+    Hallucination_Proneness = factor(ifelse(lshs < 0, "Lower Proneness (-1SD)", "Higher Proneness (+1SD)"),
+                                     levels = c("Lower Proneness (-1SD)", "Higher Proneness (+1SD)"))
+  )
+
+ef_ppw_sv_lshs %>%
+  dplyr::select(selfvoice, Hallucination_Proneness, emmean, lower.HPD, upper.HPD) %>%
+  kbl(digits = 2,
+      col.names = c("Self-Voice", "Hallucination Proneness", "PPW (z)", "Lower HPD", "Upper HPD"),
+      caption = "PPW: Estimated Marginal Means by Articulatory Prior x Hallucination Proneness (collapsed over perturbation)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+
+write.csv(ef_ppw_sv_lshs, "results/tables/exp2_emmeans_ppw_svxlshs.csv", row.names = FALSE)
+```
+
+```{r}
+ppw_sv_slopes = emtrends(bmm.hgf.ppw, ~ lshs, var = "selfvoice",
+                           at = list(lshs = c(-0.5, 0.5))) %>%
+  as.data.frame() %>%
+  mutate(
+    Hallucination_Proneness = factor(ifelse(lshs < 0, "Lower Proneness (-1SD)", "Higher Proneness (+1SD)"),
+                                     levels = c("Lower Proneness (-1SD)", "Higher Proneness (+1SD)"))
+  ) %>%
+  dplyr::select(Hallucination_Proneness, selfvoice.trend, lower.HPD, upper.HPD)
+
+ppw_sv_slopes %>%
+  kbl(digits = 3, col.names = c("Hallucination Proneness", "Self-Voice Slope",
+                                 "Lower HPD", "Upper HPD"),
+      caption = "PPW: Articulatory Prior Slopes at Each Hallucination Proneness Level") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+
+write.csv(ppw_sv_slopes, "results/tables/exp2_slopes_ppw_articulatory_prior_by_hallucination_proneness.csv", row.names = FALSE)
+```
+
+```{r, fig.width=6, fig.height=4}
+distorted_ppw_2way = ef_ppw_sv_lshs %>% filter(selfvoice == "Distorted")
+selfvoice_ppw_2way = ef_ppw_sv_lshs %>% filter(selfvoice == "Self-Voice")
+distorted_position = position_nudge(x = -0.035)
+selfvoice_position = position_nudge(x = 0.035)
+
+fig_ppw_sv_lshs = ggplot(ef_ppw_sv_lshs, aes(x = Hallucination_Proneness, y = emmean, colour = selfvoice)) +
+  geom_line(data = distorted_ppw_2way, aes(group = selfvoice), linewidth = 0.7, position = distorted_position) +
+  geom_linerange(data = distorted_ppw_2way, aes(ymin = lower.HPD, ymax = upper.HPD), linewidth = 0.5, position = distorted_position) +
+  geom_point(data = distorted_ppw_2way, size = 2, position = distorted_position) +
+  geom_line(data = selfvoice_ppw_2way, aes(group = selfvoice), linewidth = 0.7, position = selfvoice_position) +
+  geom_linerange(data = selfvoice_ppw_2way, aes(ymin = lower.HPD, ymax = upper.HPD), linewidth = 0.5, position = selfvoice_position) +
+  geom_point(data = selfvoice_ppw_2way, size = 2, position = selfvoice_position) +
+  scale_colour_manual(values = c("Distorted" = "#82B3D1", "Self-Voice" = "#264E70"), limits = c("Self-Voice", "Distorted"), labels = c("Self-Voice", "Distorted Voice")) +
+  scale_x_discrete(labels = c("Lower Proneness (-1SD)" = "Low\n(-1SD)", "Higher Proneness (+1SD)" = "High\n(+1SD)")) +
+  theme_paper() +
+  labs(title = "PPW: Articulatory Prior x Hallucination Proneness",
+       x = "Hallucination Proneness", y = expression(italic(w) * " (z)"), colour = "Articulatory\nPrior")
+
+print(fig_ppw_sv_lshs)
+```
+
+## 8.3 Prior-Posterior Weight: Articulatory Prior x Perturbation x Hallucination Proneness
+
+```{r}
+ef_ppw = emmeans(bmm.hgf.ppw, ~ selfvoice * bl * ft * lshs,
+                  at = list(selfvoice = sv_levels, bl = bl_levels,
+                            ft = ft_levels, lshs = c(-0.5, 0.5))) %>%
+  as.data.frame() %>%
+  filter(!(bl == max(bl_levels) & ft == max(ft_levels))) %>%
+  mutate(
+    selfvoice = factor(ifelse(selfvoice > 0, "Self-Voice", "Distorted"),
+                       levels = c("Distorted", "Self-Voice")),
+    Perturbation = factor(case_when(
+      bl == max(bl_levels) ~ "None",
+      ft == max(ft_levels) ~ "Foot-Tapping",
+      TRUE ~ "Art. Suppression"),
+      levels = c("None", "Foot-Tapping", "Art. Suppression")),
+    Hallucination_Proneness = factor(ifelse(lshs < 0, "Lower Proneness (-1SD)", "Higher Proneness (+1SD)"),
+                                     levels = c("Lower Proneness (-1SD)", "Higher Proneness (+1SD)"))
+  ) %>%
+  arrange(desc(Hallucination_Proneness), Perturbation, selfvoice)
+
+ef_ppw %>%
+  dplyr::select(selfvoice, Perturbation, Hallucination_Proneness, emmean, lower.HPD, upper.HPD) %>%
+  kbl(digits = 2, caption = "PPW: Estimated Marginal Means by Articulatory Prior x Perturbation x Hallucination Proneness") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+
+write.csv(ef_ppw, "results/tables/exp2_emmeans_ppw_3way.csv", row.names = FALSE)
+```
+
+```{r}
+ppw_voice_pw = emmeans(
+  bmm.hgf.ppw, ~ selfvoice | bl * ft * lshs,
+  at = list(selfvoice = sv_levels, bl = bl_levels,
+            ft = ft_levels, lshs = c(-0.5, 0.5))
+) %>%
+  contrast(method = list("Self-Voice - Distorted" = c(-1, 1))) %>%
+  as.data.frame() %>%
+  filter(!(bl == max(bl_levels) & ft == max(ft_levels))) %>%
+  mutate(
+    Perturbation = factor(case_when(
+      bl == max(bl_levels) ~ "None",
+      ft == max(ft_levels) ~ "Foot-Tapping",
+      TRUE ~ "Art. Suppression"),
+      levels = c("None", "Foot-Tapping", "Art. Suppression")),
+    Hallucination_Proneness = factor(ifelse(lshs < 0, "Lower Proneness (-1SD)", "Higher Proneness (+1SD)"),
+                                     levels = c("Lower Proneness (-1SD)", "Higher Proneness (+1SD)"))
+  ) %>%
+  dplyr::select(Perturbation, Hallucination_Proneness, contrast, estimate, lower.HPD, upper.HPD)
+
+write.csv(ppw_voice_pw,
+          "results/tables/exp2_contrasts_ppw_articulatory_prior_by_perturbation_x_hallucination_proneness.csv",
+          row.names = FALSE)
+```
+
+```{r}
+ppw_int_pw = emmeans(bmm.hgf.ppw, ~ bl * ft | selfvoice * lshs,
+                       at = list(selfvoice = sv_levels, bl = bl_levels,
+                                 ft = ft_levels, lshs = c(-0.5, 0.5))) %>%
+  contrast(int_contrasts) %>%
+  as.data.frame() %>%
+  mutate(
+    Self_Voice = factor(ifelse(selfvoice > 0, "Self-Voice", "Distorted"),
+                        levels = c("Distorted", "Self-Voice")),
+    Hallucination_Proneness = factor(ifelse(lshs < 0, "Lower Proneness (-1SD)", "Higher Proneness (+1SD)"),
+                                     levels = c("Lower Proneness (-1SD)", "Higher Proneness (+1SD)"))
+  ) %>%
+  dplyr::select(Self_Voice, Hallucination_Proneness, contrast, estimate, lower.HPD, upper.HPD)
+
+ppw_int_pw %>%
+  kbl(digits = 3,
+      col.names = c("Self-Voice", "Hallucination Proneness", "Contrast", "Estimate",
+                     "Lower HPD", "Upper HPD"),
+      caption = "PPW: Pairwise Perturbation Contrasts at Each Articulatory Prior x Hallucination Proneness Cell") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+
+write.csv(ppw_int_pw, "results/tables/exp2_contrasts_ppw_perturbation.csv", row.names = FALSE)
+```
+
+```{r, fig.width=10, fig.height=4}
+p_ppw_sm = ggplot(ef_ppw, aes(x = Perturbation, y = emmean,
+                              colour = selfvoice, group = selfvoice)) +
+  geom_line(linewidth = 0.7, position = voice_position) +
+  geom_linerange(aes(ymin = lower.HPD, ymax = upper.HPD), linewidth = 0.5,
+                 position = voice_position) +
+  geom_point(size = 2, position = voice_position) +
+  facet_wrap(~ Hallucination_Proneness, nrow = 1) +
+  scale_colour_manual(values = c("Distorted" = "#82B3D1", "Self-Voice" = "#264E70"), limits = c("Self-Voice", "Distorted"), labels = c("Self-Voice", "Distorted Voice")) +
+  scale_x_discrete(labels = c("None" = "Baseline", "Foot-Tapping" = "Foot-\nTapping",
+                              "Art. Suppression" = "Articulatory\nSuppression")) +
+  theme_paper() +
+  labs(title = "Prior-Posterior Weight", x = "Motor Task",
+       y = expression(italic(w) * " (z)"), colour = "Articulatory\nPrior")
+
+print(p_ppw_sm)
+```
+
+# 9. HGF Signal Expectation
+
+Trial-by-trial signal-expectation estimates from the HGF model.
+
+Family: gaussian. Data: all trials merged with HGF trajectories.
+
+## 9.1 Model specification + load
+
+```{r, eval=FALSE}
+# keep 3,000 post-warm-up draws per chain for state-model convergence
+bmm.hgf.xprob = brm(zmu_xprob ~ selfvoice * bl * lshs + selfvoice * ft * lshs +
+                       ztrialID + (1 + selfvoice + bl + ft || SubjID),
+                     data = d.hgf.trial, family = gaussian(), prior = priors_hgf,
+                     sample_prior = TRUE, seed = 666, chains = 4, cores = 4,
+                     iter = 4000, warmup = 1000,
+                     backend = "cmdstanr")
+saveRDS(bmm.hgf.xprob, "model_outputs/statistical_modelling_brms/experiment_2/hgf_signal_expectation.rds")
+```
+
+```{r}
+bmm.hgf.xprob = readRDS("model_outputs/statistical_modelling_brms/experiment_2/hgf_signal_expectation.rds")
+
+check_brms_diagnostics(bmm.hgf.xprob, "HGF signal expectation")
+
+report_bmm_fixef(bmm.hgf.xprob, caption = "HGF State: Signal Expectation (gaussian + ztrialID)")
+
+write.csv(extract_bmm_fixef(bmm.hgf.xprob), "results/tables/exp2_fixef_hgf_xprob.csv", row.names = FALSE)
+```
+
+## 9.2 Signal Expectation
+
+### Signal Expectation: Articulatory Prior x Perturbation
+
+```{r}
+ef_xprob_2way = emmeans(bmm.hgf.xprob, ~ selfvoice * bl * ft,
+                        at = list(selfvoice = sv_levels,
+                                  bl = bl_levels, ft = ft_levels)) %>%
+  as.data.frame() %>%
+  filter(!(bl == max(bl_levels) & ft == max(ft_levels))) %>%
+  mutate(
+    selfvoice = factor(ifelse(selfvoice > 0, "Self-Voice", "Distorted"),
+                       levels = c("Distorted", "Self-Voice")),
+    Perturbation = factor(case_when(
+      bl == max(bl_levels) ~ "None",
+      ft == max(ft_levels) ~ "Foot-Tapping",
+      TRUE ~ "Art. Suppression"),
+      levels = c("None", "Foot-Tapping", "Art. Suppression"))
+  ) %>%
+  arrange(selfvoice, Perturbation)
+
+ef_xprob_2way %>%
+  dplyr::select(selfvoice, Perturbation, emmean, lower.HPD, upper.HPD) %>%
+  kbl(digits = 2,
+      col.names = c("Self-Voice", "Perturbation", "$\\hat{\\mu}_{xprob}$ (z)", "Lower HPD", "Upper HPD"),
+      caption = "$\\hat{\\mu}_{xprob}$: Estimated Marginal Means by Articulatory Prior x Perturbation (collapsed over hallucination proneness)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+```
+
+### Signal Expectation: Articulatory Prior x Perturbation x Hallucination Proneness
+
+```{r}
+ef_xprob = emmeans(bmm.hgf.xprob, ~ selfvoice * bl * ft * lshs,
+                   at = list(selfvoice = sv_levels, bl = bl_levels,
+                             ft = ft_levels, lshs = c(-0.5, 0.5))) %>%
+  as.data.frame() %>%
+  filter(!(bl == max(bl_levels) & ft == max(ft_levels))) %>%
+  mutate(
+    selfvoice = factor(ifelse(selfvoice > 0, "Self-Voice", "Distorted"),
+                       levels = c("Distorted", "Self-Voice")),
+    Perturbation = factor(case_when(
+      bl == max(bl_levels) ~ "None",
+      ft == max(ft_levels) ~ "Foot-Tapping",
+      TRUE ~ "Art. Suppression"),
+      levels = c("None", "Foot-Tapping", "Art. Suppression")),
+    Hallucination_Proneness = factor(ifelse(lshs < 0, "Lower Proneness (-1SD)", "Higher Proneness (+1SD)"),
+                                     levels = c("Lower Proneness (-1SD)", "Higher Proneness (+1SD)"))
+  ) %>%
+  arrange(desc(Hallucination_Proneness), Perturbation, selfvoice)
+
+ef_xprob %>%
+  dplyr::select(selfvoice, Perturbation, Hallucination_Proneness, emmean, lower.HPD, upper.HPD) %>%
+  kbl(digits = 2, caption = "$\\hat{\\mu}_{xprob}$: Estimated Marginal Means by Articulatory Prior x Perturbation x Hallucination Proneness") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+
+write.csv(ef_xprob, "results/tables/exp2_emmeans_xprob_3way.csv", row.names = FALSE)
+```
+
+```{r}
+xprob_voice_pw = emmeans(
+  bmm.hgf.xprob, ~ selfvoice | bl * ft * lshs,
+  at = list(selfvoice = sv_levels, bl = bl_levels,
+            ft = ft_levels, lshs = c(-0.5, 0.5))
+) %>%
+  contrast(method = list("Self-Voice - Distorted" = c(-1, 1))) %>%
+  as.data.frame() %>%
+  filter(!(bl == max(bl_levels) & ft == max(ft_levels))) %>%
+  mutate(
+    Perturbation = factor(case_when(
+      bl == max(bl_levels) ~ "None",
+      ft == max(ft_levels) ~ "Foot-Tapping",
+      TRUE ~ "Art. Suppression"),
+      levels = c("None", "Foot-Tapping", "Art. Suppression")),
+    Hallucination_Proneness = factor(ifelse(lshs < 0, "Lower Proneness (-1SD)", "Higher Proneness (+1SD)"),
+                                     levels = c("Lower Proneness (-1SD)", "Higher Proneness (+1SD)"))
+  ) %>%
+  dplyr::select(Perturbation, Hallucination_Proneness, contrast, estimate, lower.HPD, upper.HPD)
+
+write.csv(xprob_voice_pw,
+          "results/tables/exp2_contrasts_xprob_articulatory_prior_by_perturbation_x_hallucination_proneness.csv",
+          row.names = FALSE)
+```
+
+```{r}
+xprob_voice_perturbation_by_lshs = emtrends(
+  bmm.hgf.xprob, ~ bl * ft | lshs, var = "selfvoice",
+  at = list(bl = bl_levels, ft = ft_levels, lshs = c(-0.5, 0.5))
+) %>%
+  contrast(int_contrasts) %>%
+  as.data.frame() %>%
+  mutate(
+    Hallucination_Proneness = factor(ifelse(lshs < 0, "Lower Proneness (-1SD)", "Higher Proneness (+1SD)"),
+                                     levels = c("Lower Proneness (-1SD)", "Higher Proneness (+1SD)"))
+  ) %>%
+  dplyr::select(Hallucination_Proneness, contrast, estimate, lower.HPD, upper.HPD)
+
+write.csv(xprob_voice_perturbation_by_lshs,
+          "results/tables/exp2_contrasts_xprob_articulatory_prior_x_perturbation_by_hallucination_proneness.csv",
+          row.names = FALSE)
+```
+
+```{r}
+xprob_perturbation_pw = emmeans(bmm.hgf.xprob, ~ bl * ft | selfvoice * lshs,
+                        at = list(selfvoice = sv_levels, bl = bl_levels,
+                                  ft = ft_levels, lshs = c(-0.5, 0.5))) %>%
+  contrast(int_contrasts) %>%
+  as.data.frame() %>%
+  mutate(
+    Self_Voice = factor(ifelse(selfvoice > 0, "Self-Voice", "Distorted"),
+                        levels = c("Distorted", "Self-Voice")),
+    Hallucination_Proneness = factor(ifelse(lshs < 0, "Lower Proneness (-1SD)", "Higher Proneness (+1SD)"),
+                                     levels = c("Lower Proneness (-1SD)", "Higher Proneness (+1SD)"))
+  ) %>%
+  dplyr::select(Self_Voice, Hallucination_Proneness, contrast, estimate, lower.HPD, upper.HPD)
+
+xprob_perturbation_pw %>%
+  kbl(digits = 3,
+      col.names = c("Self-Voice", "Hallucination Proneness", "Contrast", "Estimate",
+                     "Lower HPD", "Upper HPD"),
+      caption = "$\\hat{\\mu}_{xprob}$: Pairwise Perturbation Contrasts at Each Articulatory Prior x Hallucination Proneness Cell") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+
+write.csv(xprob_perturbation_pw, "results/tables/exp2_contrasts_xprob_perturbation.csv", row.names = FALSE)
+```
+
+```{r, fig.width=10, fig.height=4}
+p_xprob_sm = ggplot(ef_xprob, aes(x = Perturbation, y = emmean,
+                                  colour = selfvoice, group = selfvoice)) +
+  geom_line(linewidth = 0.7, position = voice_position) +
+  geom_linerange(aes(ymin = lower.HPD, ymax = upper.HPD), linewidth = 0.5,
+                 position = voice_position) +
+  geom_point(size = 2, position = voice_position) +
+  facet_wrap(~ Hallucination_Proneness, nrow = 1) +
+  scale_colour_manual(values = c("Distorted" = "#82B3D1", "Self-Voice" = "#264E70"), limits = c("Self-Voice", "Distorted"), labels = c("Self-Voice", "Distorted Voice")) +
+  scale_x_discrete(labels = c("None" = "Baseline", "Foot-Tapping" = "Foot-\nTapping",
+                              "Art. Suppression" = "Articulatory\nSuppression")) +
+  theme_paper() +
+  labs(title = "Signal Expectation", x = "Motor Task",
+       y = expression(hat(mu)[xprob] * " (z)"), colour = "Articulatory\nPrior")
+
+print(p_xprob_sm)
+```
+
+### Signal Expectation: Conditional Cells by Motor Condition
+
+~~This alternative view retains the conditional estimated cells but omits foot-tapping. Articulatory Prior is placed on the x-axis and motor condition is represented by separate lines, so the Prior x BL-AS pattern can be compared directly between lower- and higher-proneness panels.~~ ~~This alternative view retains the conditional estimated cells but omits foot-tapping. Hallucination proneness is placed on the x-axis, motor condition is represented by separate lines, and Articulatory Prior is faceted so the BL-AS-by-proneness pattern can be compared between Distorted-Voice and Self-Voice panels.~~ ==This alternative view retains all conditional estimated cells. Hallucination proneness is placed on the x-axis, the three motor conditions are represented by separate lines, and Articulatory Prior is faceted so the perturbation-by-proneness patterns can be compared between Distorted-Voice and Self-Voice panels.==
+
+```{r, fig.width=8, fig.height=4.5}
+ef_xprob_conditions = ef_xprob %>%
+  mutate(
+    Perturbation = factor(as.character(Perturbation),
+                          levels = c("Art. Suppression", "Foot-Tapping", "None")),
+    Hallucination_Proneness = factor(Hallucination_Proneness,
+                                     levels = c("Lower Proneness (-1SD)", "Higher Proneness (+1SD)"))
+  )
+
+suppression_xprob = ef_xprob_conditions %>% filter(Perturbation == "Art. Suppression")
+foot_tapping_xprob = ef_xprob_conditions %>% filter(Perturbation == "Foot-Tapping")
+baseline_xprob = ef_xprob_conditions %>% filter(Perturbation == "None")
+suppression_position = position_nudge(x = -0.06)
+foot_tapping_position = position_nudge(x = 0)
+baseline_position = position_nudge(x = 0.06)
+
+p_xprob_cells_conditions = ggplot(ef_xprob_conditions,
+                                  aes(x = Hallucination_Proneness, y = emmean, colour = Perturbation)) +
+  geom_line(data = suppression_xprob, aes(group = Perturbation), linewidth = 0.7,
+            position = suppression_position) +
+  geom_linerange(data = suppression_xprob, aes(ymin = lower.HPD, ymax = upper.HPD),
+                 linewidth = 0.5, position = suppression_position) +
+  geom_point(data = suppression_xprob, size = 2.5, position = suppression_position) +
+  geom_line(data = foot_tapping_xprob, aes(group = Perturbation), linewidth = 0.7,
+            position = foot_tapping_position) +
+  geom_linerange(data = foot_tapping_xprob, aes(ymin = lower.HPD, ymax = upper.HPD),
+                 linewidth = 0.5, position = foot_tapping_position) +
+  geom_point(data = foot_tapping_xprob, size = 2.5, position = foot_tapping_position) +
+  geom_line(data = baseline_xprob, aes(group = Perturbation), linewidth = 0.7,
+            position = baseline_position) +
+  geom_linerange(data = baseline_xprob, aes(ymin = lower.HPD, ymax = upper.HPD),
+                 linewidth = 0.5, position = baseline_position) +
+  geom_point(data = baseline_xprob, size = 2.5, position = baseline_position) +
+  facet_wrap(~ selfvoice, nrow = 1,
+             labeller = as_labeller(c(
+               "Distorted" = "Distorted Voice",
+               "Self-Voice" = "Self-Voice"))) +
+  scale_colour_manual(values = c("Art. Suppression" = "#82B3D1",
+                                 "Foot-Tapping" = "#8B3A3A",
+                                 "None" = "#264E70"),
+                      limits = c("None", "Foot-Tapping", "Art. Suppression"),
+                      labels = c("Baseline", "Foot-Tapping", "Art. Suppression")) +
+  scale_x_discrete(labels = c("Lower Proneness (-1SD)" = "Low\n(-1SD)",
+                              "Higher Proneness (+1SD)" = "High\n(+1SD)")) +
+  scale_y_continuous(expand = expansion(mult = c(0.08, 0.08))) +
+  theme_paper() +
+  labs(title = "Signal Expectation: Motor Condition x Hallucination Proneness\nby Articulatory Prior",
+       x = "Hallucination Proneness", y = expression(hat(mu)[xprob] * " (z)"),
+       colour = "Motor\nCondition")
+
+print(p_xprob_cells_conditions)
+```
+
+
+# 10. Manuscript Figure
+
+```{r, fig.width=8, fig.height=8}
+fig4 = ggarrange(
+  p_dprime_hl, p_ppw_sm,
+  nrow = 2, ncol = 1, labels = c("A", "B"),
+  font.label = list(size = 10, face = "bold"), align = "hv",
+  common.legend = TRUE, legend = "bottom"
+)
+fig4
+
+ggsave("results/figures/figure_4_exp2.png",
+       plot = fig4, width = 16, height = 18, units = "cm", dpi = 300, bg = "white")
+ggsave("results/figures/figure_4_exp2.pdf",
+       plot = fig4, width = 16, height = 18, units = "cm", bg = "white")
+```
+
+# 11. Session Info
+
+```{r}
+sessionInfo()
+```

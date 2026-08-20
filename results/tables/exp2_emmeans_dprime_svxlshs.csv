@@ -1,0 +1,5 @@
+"selfvoice","lshs","signal.trend","lower.HPD","upper.HPD","Hallucination_Proneness"
+"Distorted",-0.5,1.17667113842072,0.992372764500067,1.37392959479995,"Lower Proneness (-1SD)"
+"Self-Voice",-0.5,1.07392330170829,0.889142339550063,1.27034405741655,"Lower Proneness (-1SD)"
+"Distorted",0.5,1.02981435563338,0.8310738821666,1.21980891607419,"Higher Proneness (+1SD)"
+"Self-Voice",0.5,1.26488600654167,1.07344071124999,1.46730197789984,"Higher Proneness (+1SD)"

@@ -1,0 +1,9 @@
+"Prior","Perturbation","Hallucination_Proneness","Signal_Expectation","Lower_HPD","Upper_HPD"
+"Weak","No Imagery","High (+1SD)",0.094407599125,-0.22860875275,0.4393099765
+"Strong","No Imagery","High (+1SD)",-0.11244440375,-0.428095917,0.2165717085
+"Weak","Imagery","High (+1SD)",-0.559424167625,-0.88725896,-0.23245608
+"Strong","Imagery","High (+1SD)",1.20411499975,0.869317415,1.5465178025
+"Weak","No Imagery","Low (-1SD)",-0.425402183375,-0.7795522025,-0.079206872
+"Strong","No Imagery","Low (-1SD)",0.16994385425,-0.14100372125,0.53000421
+"Weak","Imagery","Low (-1SD)",0.3957429232625,0.02577385925,0.7572243455
+"Strong","Imagery","Low (-1SD)",-0.2255751225,-0.55491273579,0.1030209275

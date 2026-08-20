@@ -1,0 +1,5 @@
+"Perturbation","Hallucination_Proneness","contrast","estimate","lower.HPD","upper.HPD"
+"No Imagery","Low (-1SD)","Strong - Weak",0.601206535,0.168036185,1.04307471
+"Imagery","Low (-1SD)","Strong - Weak",-0.6213728075,-1.071137695,-0.19815517
+"No Imagery","High (+1SD)","Strong - Weak",-0.20863763,-0.619407805,0.183963325
+"Imagery","High (+1SD)","Strong - Weak",1.76370167,1.373189792,2.209210645

@@ -1,0 +1,904 @@
+---
+title: "Experiment 1 - Analysis Pipeline"
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    code_folding: hide
+    df_print: paged
+---
+
+# 0. Setup & Libraries
+
+```{r, include=FALSE}
+required_packages = c(
+  "here", "tidyverse", "rstan", "brms", "emmeans", "bayesplot",
+  "kableExtra", "ggpubr"
+)
+missing_packages = required_packages[
+  !vapply(required_packages, requireNamespace, quietly = TRUE, FUN.VALUE = logical(1))
+]
+if (length(missing_packages) > 0) {
+  stop(
+    "Missing packages: ", paste(missing_packages, collapse = ", "),
+    ". From the project root, run renv::restore(), then render this report again."
+  )
+}
+
+here::i_am("analysis_scripts/statistical_modelling/experiment_1/analysis.Rmd")
+knitr::opts_knit$set(root.dir = here::here())
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+```
+
+```{r, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(rstan)
+library(brms)
+library(emmeans)
+library(bayesplot)
+library(kableExtra)
+library(ggpubr)
+
+# clear workspace
+rm(list = ls())
+
+# create relative folders if not exist
+dir.create("model_outputs/statistical_modelling_brms/experiment_1", showWarnings = FALSE, recursive = TRUE)
+dir.create("results/tables", showWarnings = FALSE, recursive = TRUE)
+dir.create("results/figures", showWarnings = FALSE, recursive = TRUE)
+
+# shared publication theme; keep data colours in each plot's manual scale
+theme_paper = function(base_size = 16, aspect_ratio = 1) {
+  theme_bw(base_size = base_size) +
+    theme(plot.title = element_text(hjust = 0.5, size = 12),
+          panel.grid.minor = element_blank(),
+          panel.grid.major.x = element_blank(),
+          panel.grid.major.y = element_line(colour = "grey90", linewidth = 0.3),
+          panel.border = element_rect(fill = NA, colour = "grey70", linewidth = 0.4),
+          text = element_text(colour = "#4A4A4A", family = "Helvetica"),
+          axis.text = element_text(size = 9, colour = "#4A4A4A"),
+          axis.title = element_text(size = 11),
+          strip.text = element_text(size = 11, colour = "#4A4A4A", face = "bold"),
+          strip.background = element_rect(fill = "grey96", colour = NA),
+          aspect.ratio = aspect_ratio,
+          plot.margin = margin(12, 8, 12, 4, "pt"),
+          legend.position = "bottom",
+          legend.title.align = 0.5,
+          legend.text = element_text(size = 9),
+          legend.title = element_text(size = 10))
+}
+```
+
+# 1. Data Loading & Exclusions
+
+```{r}
+D = readRDS("analysis_data/experiment_1_analysis.rds")
+cat(sprintf("Raw N = %d participants\n", length(unique(D$SubjID))))
+
+# remove people with low hit rate
+d1 = D %>% filter(hittoolow == 0)
+cat(sprintf("hit-rate exclusion: N = %d\n", length(unique(D$SubjID))-length(unique(d1$SubjID))))
+
+# remove people with low music imagery
+d2 = d1 %>% filter(avg_musicvividlessthan2 == 0)
+cat(sprintf("imagery-vividness exclusion: N = %d\n", length(unique(d1$SubjID))-length(unique(d2$SubjID))))
+
+# remove people with super fast RTs
+RT = d2 %>%
+  group_by(SubjID) %>%
+  mutate(bad_RT = ifelse(response_time < 150, 1, 0)) %>%
+  summarise(bad_sub_RT = ifelse(mean(bad_RT) > 0.25, 1, 0))
+
+d3 = merge(d2, RT, by = "SubjID") %>% filter(bad_sub_RT == 0)
+
+cat(sprintf("People with >25%% RTs faster than 150 ms: N = %d\n", length(unique(d2$SubjID))-length(unique(d3$SubjID))))
+
+# remove people with over 95% same responses (smashing the same buttons??)
+response_screen = d3 %>%
+  group_by(SubjID) %>%
+  summarise(uniform_response = ifelse(max(mean(binary_resp), 1 - mean(binary_resp))>=0.95, 1, 0),
+            .groups = "drop")
+
+d = merge(d3, response_screen, by = "SubjID") %>% filter(uniform_response == 0)
+  
+cat(sprintf("Same button smasher: N = %d\n", length(unique(d3$SubjID))-length(unique(d$SubjID))))
+
+cat(sprintf("Final sample: N = %d\n", length(unique(d$SubjID))))
+
+# remove intermiediate dfs from memory
+rm(D, d1, d2, d3, RT, response_screen)
+```
+
+# 2. Demographics & Sample Description
+
+```{r}
+desc = d %>%
+  group_by(SubjID) %>%
+  summarise(
+    male = ifelse(unique(subject_gender) == "Male", 1, 0),
+    age = unique(subject_age),
+    lshs = unique(lshs_score)
+  ) %>%
+  ungroup() %>%
+  as.data.frame()
+
+cat(sprintf("Age: M = %.1f, SD = %.1f\n", mean(desc$age), sd(desc$age)))
+cat(sprintf("Gender: %d male, %d female\n", sum(desc$male), sum(1 - desc$male)))
+cat(sprintf("Hallucination Proneness (LSHSr): M = %.1f, SD = %.1f, range = %d-%d (within 16-80 range)\n",
+            mean(desc$lshs), sd(desc$lshs), min(desc$lshs), max(desc$lshs)))
+```
+
+```{r, warning=FALSE}
+lshs_m = mean(desc$lshs)
+lshs_sd = sd(desc$lshs)
+
+p_lshs = ggplot(desc, aes(x = lshs)) +
+  geom_histogram(binwidth = 3, fill = "#264E70", color = "white", linewidth = 0.3) +
+  geom_vline(xintercept = lshs_m - lshs_sd, linetype = "dashed", color = "#8B3A3A", linewidth = 0.6) +
+  geom_vline(xintercept = lshs_m + lshs_sd, linetype = "dashed", color = "#8B3A3A", linewidth = 0.6) +
+  scale_x_continuous(expand = c(0, 0), limits = c(16, 80)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  labs(x = "Hallucination Proneness (LSHSr Score)", y = "Count") +
+  theme_paper(base_size = 17, aspect_ratio = 0.4) +
+  theme(plot.margin = margin(2, 20, 2, 20), legend.position = "none")
+print(p_lshs)
+```
+
+# 3. Custom functions
+
+```{r}
+# creates a formatted fixed-effect table with BF10 and evidence stars for H0 and H1
+# *** = BF10 < 1/100 or > 100; ** = < 1/10 or > 10; * = < 1/3 or > 3
+format_bf = function(bf) {
+  ifelse(is.na(bf), NA_character_,
+         ifelse(is.infinite(bf), "Inf",
+                ifelse(bf >= 100 | (bf > 0 & bf < 0.01),
+                       formatC(bf, format = "e", digits = 2),
+                       sprintf("%.2f", bf))))
+}
+
+report_bmm_fixef = function(model, caption = NULL) {
+  estimates = fixef(model) %>% as.data.frame() %>% rownames_to_column("term") %>% dplyr::select(term, Estimate, Est.Error, Q2.5, Q97.5)
+
+  terms = estimates$term
+  bf_results = data.frame(term = character(), BF10 = character(), H0 = character(), H1 = character())
+
+  for (term in terms) {
+    hyp = hypothesis(model, paste(term, "= 0"))
+    # the point-null hypothesis gives BF01, so invert it for BF10
+    BF10_raw = abs(1 / hyp$hypothesis$Evid.Ratio)
+    H0_ind = ifelse(BF10_raw < (1/100), "***", ifelse(BF10_raw < (1/10), "**", ifelse(BF10_raw < (1/3), "* ", "")))
+    H1_ind = ifelse(BF10_raw > 100, "***", ifelse(BF10_raw > 10, "**", ifelse(BF10_raw > 3, "* ", "")))
+
+    bf_results = rbind(bf_results, data.frame(term = term, BF10 = format_bf(BF10_raw), H0 = H0_ind, H1 = H1_ind))
+  }
+
+  final_table = estimates %>% left_join(bf_results, by = "term") %>% rename("2.5%" = Q2.5, "97.5%" = Q97.5)
+  return(kable(final_table, digits = 2, caption = caption, escape = TRUE) %>% kable_classic("hover", full_width = FALSE, html_font = "Arial", position = "left"))
+}
+
+# extracts the same fixed effects and BF10 values as a data frame for saving as csv
+# BF10_raw stays numeric for later analysis, while BF10 is formatted for display
+extract_bmm_fixef = function(model) {
+  estimates = fixef(model) %>% as.data.frame() %>% rownames_to_column("term") %>% dplyr::select(term, Estimate, Est.Error, Q2.5, Q97.5)
+
+  terms = estimates$term
+  bf_results = data.frame(term = character(), BF10_raw = numeric(), BF10 = character(), stringsAsFactors = FALSE)
+
+  for (term in terms) {
+    hyp = hypothesis(model, paste(term, "= 0"))
+    # the point-null hypothesis gives BF01, so invert it for BF10
+    BF10_raw = abs(1 / hyp$hypothesis$Evid.Ratio)
+    bf_results = rbind(bf_results, data.frame(term = term, BF10_raw = BF10_raw, BF10 = format_bf(BF10_raw), stringsAsFactors = FALSE))
+  }
+
+  estimates %>% left_join(bf_results, by = "term") %>% rename("2.5%" = Q2.5, "97.5%" = Q97.5)
+}
+
+
+# checks the worst Rhat, bulk ESS and tail ESS across all parameters, plus total divergences
+# if the model fails, the error identifies every failed threshold and its actual value
+check_brms_diagnostics = function(model, label) {
+  draw_summary = posterior::summarise_draws(posterior::as_draws_array(model))
+  max_rhat = max(draw_summary$rhat, na.rm = TRUE)
+  min_bulk_ess = min(draw_summary$ess_bulk, na.rm = TRUE)
+  min_tail_ess = min(draw_summary$ess_tail, na.rm = TRUE)
+  max_rhat_parameter = draw_summary$variable[which.max(draw_summary$rhat)]
+  min_bulk_ess_parameter = draw_summary$variable[which.min(draw_summary$ess_bulk)]
+  min_tail_ess_parameter = draw_summary$variable[which.min(draw_summary$ess_tail)]
+  sampler_diagnostics = brms::nuts_params(model)
+  divergences = sum(sampler_diagnostics$Parameter == "divergent__" & sampler_diagnostics$Value == 1)
+
+  problems = character()
+  if (max_rhat > 1.01) problems = c(problems, sprintf("max Rhat = %.3f for %s (> 1.01)", max_rhat, max_rhat_parameter))
+  if (min_bulk_ess < 400) problems = c(problems, sprintf("min bulk ESS = %.0f for %s (< 400)", min_bulk_ess, min_bulk_ess_parameter))
+  if (min_tail_ess < 400) problems = c(problems, sprintf("min tail ESS = %.0f for %s (< 400)", min_tail_ess, min_tail_ess_parameter))
+  if (divergences > 0) problems = c(problems, sprintf("divergences = %d (> 0)", divergences))
+
+  if (length(problems) > 0) stop(sprintf("%s did not pass diagnostics: %s", label, paste(problems, collapse = "; ")), call. = FALSE)
+  cat(sprintf("%s passed diagnostics: max Rhat = %.3f; min bulk ESS = %.0f; min tail ESS = %.0f; divergences = %d\n", label, max_rhat, min_bulk_ess, min_tail_ess, divergences))
+}
+
+# reverses the direction of an estimate and swaps its lower and upper interval bounds
+# this is for flipping the signal for the criterion measure which in brms framework is more like
+# 'willingness' so needs to be flipped to create 'criterion'
+signflip = function(df, cols = c("emmean", "lower.HPD", "upper.HPD")) {
+  df[cols] = df[cols] * -1
+  # multiplying by -1 reverses the interval, so put the bounds back in order
+  temp = df[[cols[2]]]
+  df[[cols[2]]] = df[[cols[3]]]
+  df[[cols[3]]] = temp
+  df
+}
+
+prior_position = position_dodge(width = 0.18)
+
+```
+
+# 4. Variable Coding
+
+- **signal**: deviation-coded (+/-0.5), positive = signal present
+- **fam**: deviation-coded (+/-0.5), positive = familiar/strong prior
+- **musicvivid**: z-scored / 2 (mean=0, SD=0.5)
+- **lshs**: z-scored / 2 (mean=0, SD=0.5)
+Dividing by 2 puts continuous predictors on the same scale as deviation-coded factors.
+
+```{r}
+d.SDT = d %>%
+  dplyr::select(SubjID, familiar, interference, avg_block_music_vivid,
+                volume, binary_resp, lshs_score) %>%
+  mutate(
+    signal = scale(ifelse(volume > 0, 1, 0), scale = FALSE),
+    fam = scale(familiar, scale = FALSE),
+    musicvivid = scale(avg_block_music_vivid)/2,
+    lshs = scale(lshs_score)/2
+  ) %>%
+  rename(resp = binary_resp)
+
+cat(sprintf("SDT dataset: %d trials from %d participants\n",
+            nrow(d.SDT), length(unique(d.SDT$SubjID))))
+```
+
+```{r}
+# HGF trait parameter one row per participant x condition
+# HGF trait parameter analysed here: prior_posterior_weight
+hgf_para = read.csv("model_outputs/computational_modelling_hgf/experiment_1/parameter_estimates_df.csv") %>%
+  mutate(familiar = ifelse(condition < 3, 0, 1))
+
+d.musicvivid = d %>%
+  group_by(SubjID, familiar) %>%
+  summarise(music_vivid = mean(avg_block_music_vivid),
+            lshs = unique(lshs_score),    
+            .groups = "drop")
+
+hgf_para = merge(hgf_para, d.musicvivid, by = c("SubjID", "familiar"))
+
+d.hgf.session = hgf_para %>%
+  mutate(fam = scale(familiar, scale = FALSE),
+         musicvivid = scale(music_vivid)/2,
+         lshs = scale(lshs)/2,
+         SubjID = as.factor(SubjID),
+         zPPW = scale(prior_posterior_weight))
+
+rm(hgf_para, d.musicvivid)
+
+cat(sprintf("HGF trait dataset: %d rows (participant x condition)\n", nrow(d.hgf.session)))
+```
+
+```{r}
+# HGF state parameters, i.e. trial-by-trial trajectories recovered by replaying
+# observed responses. The state on each task row follows the preceding response.
+hgf_traj = read.csv("model_outputs/computational_modelling_hgf/experiment_1/estimated_state_trajectories.csv") %>%
+  group_by(SubjID, condition) %>%
+  arrange(timestep, .by_group = TRUE) %>%
+  mutate(trialID = cumsum(training == 0)) %>%
+  filter(training == 0) %>%
+  ungroup()
+
+d.hgf.trial = d %>%
+  mutate(condition = case_when(
+    familiar == 0 & interference == "noise" ~ 1,
+    familiar == 0 & interference == "music" ~ 2,
+    familiar == 1 & interference == "noise" ~ 3,
+    familiar == 1 & interference == "music" ~ 4
+  )) %>%
+  merge(hgf_traj, by = c("SubjID", "condition", "trialID")) %>%
+  arrange(SubjID, condition, trialID) %>%
+  mutate(
+    SubjID = as.factor(SubjID),
+    fam = scale(familiar, scale = FALSE),
+    musicvivid = scale(avg_block_music_vivid)/2,
+    lshs = scale(lshs_score)/2,
+    # xbin prediction is the signal expectation before the current HGF update; its logit is xprob posterior from t-1
+    zmu_xprob = scale(qlogis(xbin__prediction_mean)),
+    ztrialID = scale(trialID)
+  )
+
+rm(hgf_traj)
+
+cat(sprintf("HGF state dataset: %d trial-level rows\n", nrow(d.hgf.trial)))
+```
+
+# 5. Manipulation Checks
+
+## 5.1 Auditory Prior Check: Signal Vividness (Strong > Weak)
+
+```{r}
+manipcheck = d %>%
+  group_by(SubjID, familiar) %>%
+  summarise(meanvivid = unique(response_Speech_vividness), .groups = "drop") %>%
+  pivot_wider(id_cols = SubjID, 
+              names_from = familiar, 
+              values_from = meanvivid)
+
+tt = t.test(manipcheck$`1`, manipcheck$`0`, paired = TRUE)
+
+cat(sprintf("Strong Prior: M = %.1f\n", mean(manipcheck$`1`)))
+cat(sprintf("Weak Prior:   M = %.1f\n", mean(manipcheck$`0`)))
+cat(sprintf("Paired t(%d) = %.2f, p = %.3f\n", tt$parameter, tt$statistic, tt$p.value))
+```
+
+## 5.2 Auditory Perturbation Check: Music Identification (Shape of You)
+
+```{r}
+manipcheck2 = d %>%
+  filter(interference == "music") %>%
+  group_by(SubjID) %>%
+  summarise(knowit = ifelse(any(music_identified == 1), 1, 0),
+            musicvivid = mean(avg_block_music_vivid))
+
+cat(sprintf("Song/artist identified: %.1f%%\n", mean(manipcheck2$knowit) * 100))
+cat(sprintf("Music imagery vividness: M = %.1f, SD = %.1f\n",
+            mean(manipcheck2$musicvivid), sd(manipcheck2$musicvivid)))
+
+tt2 = t.test(manipcheck2[manipcheck2$knowit == 1, ]$musicvivid,
+              manipcheck2[manipcheck2$knowit == 0, ]$musicvivid)
+
+cat(sprintf("Vividness by identification: t(%.1f) = %.2f, p = %.3f\n",
+            tt2$parameter, tt2$statistic, tt2$p.value))
+```
+
+Knowing the song did not affect imagery vividness.
+
+# 6. Priors
+
+**SDT priors** (probit link): Intercept ~ N(-0.67, 0.38), b ~ N(0, 0.5), sd ~ t(3, 0, 0.5)
+
+**HGF priors** (gaussian, z-scored DVs): Intercept ~ N(0, 1), b ~ N(0, 1), sd ~ t(3, 0, 1). Sigma and alpha (skew_normal) use brms defaults.
+
+```{r}
+priors_SDT = c(
+  set_prior("normal(-0.67, 0.38)", class = "Intercept"),
+  set_prior("normal(0, 0.5)", class = "b"),
+  set_prior("student_t(3, 0, 0.5)", class = "sd")
+)
+
+priors_hgf = c(
+  set_prior("normal(0, 1)", class = "Intercept"),
+  set_prior("normal(0, 1)", class = "b"),
+  set_prior("student_t(3, 0, 1)", class = "sd")
+)
+```
+
+# 7. Model 1: Signal Detection Theory (d' and c)
+
+The primary SDT model. Decomposes detection into sensitivity (d')
+and criterion (c) via probit SDT parameterisation.
+
+## 7.1 Model specification + load
+
+```{r, eval=FALSE}
+bmm.sdt = brm(
+  formula = bf(resp ~ signal * fam * musicvivid * lshs + (1 + signal * fam || SubjID)),
+  data = d.SDT,
+  family = bernoulli("probit"),
+  prior = priors_SDT,
+  sample_prior = TRUE,
+  seed = 666,
+  chains = 4,
+  cores = 4,
+  backend = "cmdstanr"
+)
+saveRDS(bmm.sdt, "model_outputs/statistical_modelling_brms/experiment_1/sdt.rds")
+```
+
+```{r}
+bmm.sdt = readRDS("model_outputs/statistical_modelling_brms/experiment_1/sdt.rds")
+check_brms_diagnostics(bmm.sdt, "SDT")
+report_bmm_fixef(bmm.sdt, caption = "SDT Model: Fixed Effects (bernoulli/probit, all trials)")
+write.csv(extract_bmm_fixef(bmm.sdt), "results/tables/exp1_fixef_sdt.csv", row.names = FALSE)
+```
+
+## 7.2 Posterior Predictive Check
+
+```{r, fig.width=6, fig.height=4}
+set.seed(666)
+posterior_predictions = posterior_predict(bmm.sdt, ndraws = 500)
+posterior_check = data.frame(
+  Measure = c(bmm.sdt$data$resp, as.vector(posterior_predictions)),
+  Source = c(rep("Observation", nrow(bmm.sdt$data)),
+             rep("Posterior", length(posterior_predictions)))
+)
+rm(posterior_predictions)
+
+ggplot(posterior_check, aes(x = Measure, colour = Source, fill = Source)) +
+  geom_bar(aes(y = after_stat(prop)), position = "dodge", stat = "count",
+           alpha = 0.3, width = 0.05) +
+  labs(x = "Detection (0=No, 1=Yes)", y = "Probability",
+       colour = "Data", fill = "Data") +
+  scale_colour_manual(values = c("Observation" = "#8B3A3A", "Posterior" = "#264E70")) +
+  scale_fill_manual(values = c("Observation" = "#8B3A3A", "Posterior" = "#264E70")) +
+  scale_x_continuous(limits = c(-0.1, 1.1), breaks = c(0, 1)) +
+  theme_paper() +
+  theme(axis.title = element_text(size = 12))
+```
+
+## 7.3 Sensitivity (d'): Auditory Prior x Hallucination Proneness
+
+```{r}
+ef_dprime = emtrends(bmm.sdt, ~ fam * lshs, var = "signal",
+                     at = list(musicvivid = 0, lshs = c(-0.5, 0.5))) %>%
+  as.data.frame() %>%
+  mutate(Prior = factor(ifelse(fam < 0, "Weak", "Strong"), levels = c("Strong", "Weak")),
+         Hallucination_Proneness = factor(ifelse(lshs < 0, "Low (-1SD)", "High (+1SD)"), levels = c("Low (-1SD)", "High (+1SD)"))) %>%
+  arrange(desc(Hallucination_Proneness), Prior) %>%
+  dplyr::select(Prior, Hallucination_Proneness, Sensitivity_dprime = signal.trend, Lower_HPD = lower.HPD, Upper_HPD = upper.HPD)
+
+ef_dprime %>%
+  kbl(digits = 2, caption = "Estimated Sensitivity (d') by Auditory Prior x Hallucination Proneness") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+
+contrast_dprime_prior = contrast(emtrends(bmm.sdt, ~ fam | lshs, var = "signal", at = list(musicvivid = 0, lshs = c(-0.5, 0.5))), method = list("Strong - Weak" = c(-1, 1))) %>%
+  as.data.frame() %>%
+  mutate(Hallucination_Proneness = ifelse(lshs > 0, "High (+1SD)", "Low (-1SD)")) %>%
+  dplyr::select(Hallucination_Proneness, contrast, estimate, lower.HPD, upper.HPD)
+
+write.csv(ef_dprime, "results/tables/exp1_emmeans_dprime_prior_x_hallucination_proneness.csv", row.names = FALSE)
+write.csv(contrast_dprime_prior, "results/tables/exp1_contrasts_dprime_prior_by_hallucination_proneness.csv", row.names = FALSE)
+```
+
+```{r, fig.width=8, fig.height=4}
+weak_dprime = ef_dprime %>% filter(Prior == "Weak")
+strong_dprime = ef_dprime %>% filter(Prior == "Strong")
+weak_position = position_nudge(x = -0.035)
+strong_position = position_nudge(x = 0.035)
+
+p_dprime = ggplot(ef_dprime, aes(x = Hallucination_Proneness, y = Sensitivity_dprime, colour = Prior)) +
+  geom_hline(yintercept = 0, linetype = "dotted", colour = "grey65", linewidth = 0.3) +
+  geom_line(data = weak_dprime, aes(group = Prior), linewidth = 0.7, position = weak_position) +
+  geom_linerange(data = weak_dprime, aes(ymin = Lower_HPD, ymax = Upper_HPD), linewidth = 0.5, position = weak_position) +
+  geom_point(data = weak_dprime, size = 2, position = weak_position) +
+  geom_line(data = strong_dprime, aes(group = Prior), linewidth = 0.7, position = strong_position) +
+  geom_linerange(data = strong_dprime, aes(ymin = Lower_HPD, ymax = Upper_HPD), linewidth = 0.5, position = strong_position) +
+  geom_point(data = strong_dprime, size = 2, position = strong_position) +
+  scale_colour_manual(values = c("Weak" = "#82B3D1", "Strong" = "#264E70"), limits = c("Strong", "Weak")) +
+  scale_x_discrete(labels = c("Low\n(-1SD)", "High\n(+1SD)")) +
+  scale_y_continuous(limits = c(0.6, 1.9)) + 
+  theme_paper() +
+  theme(axis.title = element_text(size = 12)) +
+  labs(title = "Sensitivity: Auditory Prior x Hallucination Proneness",
+       x = "Hallucination Proneness", y = expression(italic(d) * "'"), colour = "Auditory\nPrior")
+
+print(p_dprime)
+
+```
+
+## 7.4 Criterion (c): Auditory Prior x Hallucination Proneness
+
+```{r}
+ef_criterion = emmeans(bmm.sdt, ~ fam * lshs,
+                        at = list(lshs = c(-0.5, 0.5))) %>%
+  as.data.frame() %>%
+  mutate(
+    fam = factor(ifelse(fam < 0, "Weak Prior", "Strong Prior"),
+                 levels = c("Weak Prior", "Strong Prior")),
+    lshs = factor(ifelse(lshs < 0, "Lower Proneness (-1SD)", "Higher Proneness (+1SD)"),
+                  levels = c("Lower Proneness (-1SD)", "Higher Proneness (+1SD)"))
+  ) %>%
+  signflip()
+
+ef_criterion %>%
+  kbl(digits = 2, caption = "Estimated Criterion (c) by Auditory Prior x Hallucination Proneness (sign-flipped)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+
+write.csv(ef_criterion, "results/tables/exp1_emmeans_criterion_prior_x_hallucination_proneness.csv", row.names = FALSE)
+```
+
+### Pairwise: Auditory Prior slopes on criterion at each Hallucination Proneness level
+
+```{r}
+crit_fam_slopes = emtrends(bmm.sdt, ~ lshs, var = "fam",
+                                     at = list(fam = c(-0.5, 0.5),
+                                               lshs = c(-0.5, 0.5))) %>%
+  as.data.frame() %>%
+  mutate(Hallucination_Proneness = factor(ifelse(lshs < 0, "Lower Proneness (-1SD)", "Higher Proneness (+1SD)"),
+                                          levels = c("Lower Proneness (-1SD)", "Higher Proneness (+1SD)"))
+  ) %>%
+  dplyr::select(Hallucination_Proneness, fam.trend, lower.HPD, upper.HPD) %>%
+  signflip(cols = c("fam.trend", "lower.HPD", "upper.HPD"))
+
+crit_fam_slopes %>%
+  kbl(digits = 3, col.names = c("Hallucination Proneness", "Slope", "Lower HPD", "Upper HPD"),
+      caption = "Criterion: Auditory Prior Slopes at Hallucination Proneness Levels (sign-flipped)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+
+write.csv(crit_fam_slopes, "results/tables/exp1_slopes_criterion_prior_by_hallucination_proneness.csv", row.names = FALSE)
+```
+
+### Figure: Criterion by Auditory Prior x Hallucination Proneness
+
+```{r, fig.width=6, fig.height=4}
+fig_criterion = ggplot(ef_criterion, aes(x = lshs, y = emmean, color = fam)) +
+  geom_point(size = 3, position = position_dodge(0.1)) +
+  geom_line(aes(group = fam), position = position_dodge(0.1)) +
+  geom_errorbar(aes(ymin = lower.HPD, ymax = upper.HPD),
+                width = 0, position = position_dodge(0.1)) +
+  scale_colour_manual(values = c("Weak Prior" = "#82B3D1", "Strong Prior" = "#264E70"),
+                      limits = c("Strong Prior", "Weak Prior")) +
+  scale_x_discrete(labels = c("Low\n(-1SD)", "High\n(+1SD)")) +
+  labs(title = "Criterion (c): Auditory Prior x Hallucination Proneness",
+       x = "Hallucination Proneness", y = "Criterion (c)", color = "Auditory\nPrior") +
+  theme_paper() +
+  theme(axis.title = element_text(size = 12))
+
+print(fig_criterion)
+```
+
+## 7.5 Criterion (c): Auditory Prior x Auditory Perturbation x Hallucination Proneness
+
+```{r}
+ef_criterion = emmeans(bmm.sdt, ~ fam * musicvivid * lshs,
+                        at = list(musicvivid = c(-0.5, 0.5),
+                                  lshs = c(-0.5, 0.5))) %>%
+  as.data.frame() %>%
+  mutate(
+    fam = factor(ifelse(fam < 0, "Weak Prior", "Strong Prior"),
+                 levels = c("Weak Prior", "Strong Prior")),
+    musicvivid = factor(ifelse(musicvivid < 0, "No\nImagery", "Music\nImagery"),
+                        levels = c("No\nImagery", "Music\nImagery")),
+    lshs = factor(ifelse(lshs < 0, "Lower Proneness (-1SD)", "Higher Proneness (+1SD)"),
+                  levels = c("Lower Proneness (-1SD)", "Higher Proneness (+1SD)"))
+  ) %>%
+  arrange(desc(lshs), musicvivid, fam) %>%
+  signflip()
+
+ef_criterion %>%
+  kbl(digits = 2, caption = "Estimated Criterion (c) by Auditory Prior x Auditory Perturbation x Hallucination Proneness (sign-flipped)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+
+write.csv(ef_criterion, "results/tables/exp1_emmeans_criterion_3way.csv", row.names = FALSE)
+
+ef_crit_3way = ef_criterion %>%
+  mutate(Prior = factor(ifelse(fam == "Strong Prior", "Strong", "Weak"), levels = c("Strong", "Weak")),
+         Perturbation = factor(ifelse(musicvivid == "Music\nImagery", "Imagery", "No Imagery"), levels = c("No Imagery", "Imagery")),
+         Hallucination_Proneness = lshs) %>%
+  dplyr::select(Prior, Perturbation, Hallucination_Proneness, Criterion_c = emmean, Lower_HPD = lower.HPD, Upper_HPD = upper.HPD)
+
+contrast_criterion_prior = contrast(emmeans(bmm.sdt, ~ fam | musicvivid * lshs, at = list(musicvivid = c(-0.5, 0.5), lshs = c(-0.5, 0.5))), method = list("Strong - Weak" = c(-1, 1))) %>%
+  as.data.frame() %>%
+  signflip(cols = c("estimate", "lower.HPD", "upper.HPD")) %>%
+  mutate(Perturbation = ifelse(musicvivid > 0, "Imagery", "No Imagery"), Hallucination_Proneness = ifelse(lshs > 0, "High (+1SD)", "Low (-1SD)")) %>%
+  dplyr::select(Perturbation, Hallucination_Proneness, contrast, estimate, lower.HPD, upper.HPD)
+
+write.csv(ef_crit_3way, "results/tables/exp1_emmeans_criterion_3way_labeled.csv", row.names = FALSE)
+write.csv(contrast_criterion_prior, "results/tables/exp1_contrasts_criterion_prior_by_perturbation_x_hallucination_proneness.csv", row.names = FALSE)
+```
+
+### Pairwise: Auditory Perturbation slopes on criterion at each Auditory Prior x Hallucination Proneness cell
+
+```{r}
+crit_perturbation_slopes = emtrends(bmm.sdt, ~ fam * lshs, var = "musicvivid",
+                                     at = list(fam = c(-0.5, 0.5),
+                                               lshs = c(-0.5, 0.5))) %>%
+  as.data.frame() %>%
+  mutate(
+    Prior = factor(ifelse(fam < 0, "Weak Prior", "Strong Prior"),
+                   levels = c("Weak Prior", "Strong Prior")),
+    Hallucination_Proneness = factor(ifelse(lshs < 0, "Lower Proneness (-1SD)", "Higher Proneness (+1SD)"),
+                                     levels = c("Lower Proneness (-1SD)", "Higher Proneness (+1SD)"))
+  ) %>%
+  dplyr::select(Prior, Hallucination_Proneness, musicvivid.trend, lower.HPD, upper.HPD) %>%
+  signflip(cols = c("musicvivid.trend", "lower.HPD", "upper.HPD"))
+
+crit_perturbation_slopes %>%
+  kbl(digits = 3, col.names = c("Auditory Prior", "Hallucination Proneness", "Slope", "Lower HPD", "Upper HPD"),
+      caption = "Criterion: Auditory Perturbation Slopes at Each Auditory Prior x Hallucination Proneness Cell (sign-flipped)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+
+write.csv(crit_perturbation_slopes, "results/tables/exp1_slopes_criterion_perturbation_by_prior_x_hallucination_proneness.csv", row.names = FALSE)
+```
+
+### Figure: Criterion by Auditory Prior x Auditory Perturbation x Hallucination Proneness
+
+```{r, fig.width=8, fig.height=4}
+p_crit_hl = ggplot(ef_crit_3way, aes(x = Perturbation, y = Criterion_c,
+                                     colour = Prior, group = Prior)) +
+  geom_hline(yintercept = 0, linetype = "dotted", colour = "grey65", linewidth = 0.3) +
+  geom_line(linewidth = 0.7, position = prior_position) +
+  geom_linerange(aes(ymin = Lower_HPD, ymax = Upper_HPD), linewidth = 0.5,
+                 position = prior_position) +
+  geom_point(size = 2, position = prior_position) +
+  facet_wrap(~ Hallucination_Proneness, nrow = 1) +
+  scale_colour_manual(values = c("Weak" = "#82B3D1", "Strong" = "#264E70"), limits = c("Strong", "Weak")) +
+  theme_paper() +
+  labs(title = "Criterion", x = "Auditory Perturbation",
+       y = expression(italic(c)), color = "Auditory\nPrior")
+
+print(p_crit_hl)
+```
+
+# 8. HGF Trait Parameters (Session-Level)
+
+## 8.1 Model specification + load
+
+```{r, eval=FALSE}
+
+bmm.hgf.ppw = brm(zPPW ~ fam * musicvivid * lshs + (1 | SubjID),
+                    data = d.hgf.session, family = gaussian(), prior = priors_hgf,
+                    sample_prior = TRUE, seed = 666, chains = 4, cores = 4,
+                    backend = "cmdstanr",
+                    control = list(adapt_delta = 0.99))
+saveRDS(bmm.hgf.ppw, "model_outputs/statistical_modelling_brms/experiment_1/hgf_prior_posterior_weight.rds")
+```
+
+```{r}
+bmm.hgf.ppw = readRDS("model_outputs/statistical_modelling_brms/experiment_1/hgf_prior_posterior_weight.rds")
+
+check_brms_diagnostics(bmm.hgf.ppw, "HGF prior-posterior weight")
+
+report_bmm_fixef(bmm.hgf.ppw, caption = "HGF Trait: Prior-Posterior Weight (gaussian)")
+
+write.csv(extract_bmm_fixef(bmm.hgf.ppw), "results/tables/exp1_fixef_hgf_ppw.csv", row.names = FALSE)
+```
+
+
+
+# 9. HGF State Parameters
+
+## 9.1 Model specification + load
+
+```{r, eval=FALSE}
+# keep 3,000 post-warm-up draws per chain for state-model convergence
+bmm.hgf.xprob = brm(zmu_xprob ~ fam * musicvivid * lshs + ztrialID + (1 + fam || SubjID),
+                     data = d.hgf.trial, family = gaussian(), prior = priors_hgf,
+                     sample_prior = TRUE, seed = 666, chains = 4, cores = 4,
+                     iter = 4000, warmup = 1000,
+                     backend = "cmdstanr")
+saveRDS(bmm.hgf.xprob, "model_outputs/statistical_modelling_brms/experiment_1/hgf_signal_expectation.rds")
+```
+
+```{r}
+bmm.hgf.xprob = readRDS("model_outputs/statistical_modelling_brms/experiment_1/hgf_signal_expectation.rds")
+
+check_brms_diagnostics(bmm.hgf.xprob, "HGF pre-action signal expectation")
+
+report_bmm_fixef(bmm.hgf.xprob, caption = "HGF State: Signal Expectation (gaussian, + ztrialID)")
+
+write.csv(extract_bmm_fixef(bmm.hgf.xprob), "results/tables/exp1_fixef_hgf_xprob.csv", row.names = FALSE)
+```
+
+## 9.2 Signal Expectation
+
+### Signal Expectation: Auditory Prior x Auditory Perturbation
+
+```{r}
+ef_xprob_fam_mv = emmeans(bmm.hgf.xprob, ~ fam * musicvivid,
+                          at = list(musicvivid = c(-0.5, 0.5))) %>%
+  as.data.frame() %>%
+  mutate(
+    fam = factor(ifelse(fam < 0, "Weak Prior", "Strong Prior"),
+                 levels = c("Weak Prior", "Strong Prior")),
+    musicvivid = factor(ifelse(musicvivid < 0, "No\nImagery", "Music\nImagery"),
+                        levels = c("No\nImagery", "Music\nImagery"))
+  )
+
+ef_xprob_fam_mv %>%
+  kbl(digits = 2, caption = "$\\hat{\\mu}_{xprob}$: Estimated Marginal Means by Auditory Prior x Auditory Perturbation") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+
+write.csv(ef_xprob_fam_mv, "results/tables/exp1_emmeans_xprob_prior_x_perturbation.csv", row.names = FALSE)
+```
+
+```{r}
+xprob_fam_mv_slopes = emtrends(bmm.hgf.xprob, ~ fam, var = "musicvivid",
+                               at = list(fam = c(-0.5, 0.5))) %>%
+  as.data.frame() %>%
+  mutate(
+    Prior = factor(ifelse(fam < 0, "Weak Prior", "Strong Prior"),
+                   levels = c("Weak Prior", "Strong Prior"))
+  ) %>%
+  dplyr::select(Prior, musicvivid.trend, lower.HPD, upper.HPD)
+
+xprob_fam_mv_slopes %>%
+  kbl(digits = 3, col.names = c("Prior", "Slope", "Lower HPD", "Upper HPD"),
+      caption = "$\\hat{\\mu}_{xprob}$: Auditory Perturbation Slopes at Each Auditory Prior Level") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+
+write.csv(xprob_fam_mv_slopes, "results/tables/exp1_slopes_xprob_perturbation_by_prior.csv", row.names = FALSE)
+```
+
+```{r, fig.width=6, fig.height=4}
+fig_xprob_fam_mv = ggplot(ef_xprob_fam_mv,
+                           aes(x = musicvivid, y = emmean, color = fam)) +
+  geom_point(size = 3, position = position_dodge(0.1)) +
+  geom_line(aes(group = fam), position = position_dodge(0.1)) +
+  geom_errorbar(aes(ymin = lower.HPD, ymax = upper.HPD),
+                width = 0, position = position_dodge(0.1)) +
+  scale_colour_manual(values = c("Weak Prior" = "#82B3D1", "Strong Prior" = "#264E70"),
+                      limits = c("Strong Prior", "Weak Prior")) +
+  labs(title = expression(hat(mu)[xprob] * ": Auditory Prior x Auditory Perturbation"),
+       x = "Auditory Perturbation", y = expression(hat(mu)[xprob] ~ "(z)"),
+       color = "Auditory\nPrior") +
+  theme_paper() +
+  theme(axis.title = element_text(size = 12))
+
+print(fig_xprob_fam_mv)
+```
+
+### Signal Expectation: Auditory Prior x Hallucination Proneness
+
+```{r}
+ef_xprob_prior_lshs = emmeans(bmm.hgf.xprob, ~ fam * lshs,
+                              at = list(fam = c(-0.5, 0.5),
+                                        lshs = c(-0.5, 0.5))) %>%
+  as.data.frame() %>%
+  mutate(
+    fam = factor(ifelse(fam < 0, "Weak Prior", "Strong Prior"),
+                 levels = c("Weak Prior", "Strong Prior")),
+    lshs = factor(ifelse(lshs < 0, "Lower Proneness (-1SD)", "Higher Proneness (+1SD)"),
+                  levels = c("Lower Proneness (-1SD)", "Higher Proneness (+1SD)"))
+  )
+
+ef_xprob_prior_lshs %>%
+  kbl(digits = 2, caption = "$\\hat{\\mu}_{xprob}$: Estimated Marginal Means by Auditory Prior x Hallucination Proneness") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+
+write.csv(ef_xprob_prior_lshs, "results/tables/exp1_emmeans_xprob_prior_x_hallucination_proneness.csv", row.names = FALSE)
+```
+
+```{r}
+xprob_prior_lshs_slopes = emtrends(bmm.hgf.xprob, ~ fam, var = "lshs",
+                                   at = list(fam = c(-0.5, 0.5))) %>%
+  as.data.frame() %>%
+  mutate(
+    Prior = factor(ifelse(fam < 0, "Weak Prior", "Strong Prior"),
+                   levels = c("Weak Prior", "Strong Prior"))
+  ) %>%
+  dplyr::select(Prior, lshs.trend, lower.HPD, upper.HPD)
+
+xprob_prior_lshs_slopes %>%
+  kbl(digits = 3, col.names = c("Prior", "Slope", "Lower HPD", "Upper HPD"),
+      caption = "$\\hat{\\mu}_{xprob}$: Hallucination Proneness Slopes at Each Auditory Prior Level") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+
+write.csv(xprob_prior_lshs_slopes, "results/tables/exp1_slopes_xprob_hallucination_proneness_by_prior.csv", row.names = FALSE)
+```
+
+```{r, fig.width=6, fig.height=4}
+fig_xprob_prior_lshs = ggplot(ef_xprob_prior_lshs,
+                              aes(x = lshs, y = emmean, color = fam)) +
+  geom_point(size = 3, position = position_dodge(0.1)) +
+  geom_line(aes(group = fam), position = position_dodge(0.1)) +
+  geom_errorbar(aes(ymin = lower.HPD, ymax = upper.HPD),
+                width = 0, position = position_dodge(0.1)) +
+  scale_colour_manual(values = c("Weak Prior" = "#82B3D1", "Strong Prior" = "#264E70"),
+                      limits = c("Strong Prior", "Weak Prior")) +
+  scale_x_discrete(labels = c("Low\n(-1SD)", "High\n(+1SD)")) +
+  labs(title = expression(hat(mu)[xprob] * ": Auditory Prior x Hallucination Proneness"),
+       x = "Hallucination Proneness", y = expression(hat(mu)[xprob] ~ "(z)"),
+       color = "Auditory\nPrior") +
+  theme_paper() +
+  theme(axis.title = element_text(size = 12))
+
+print(fig_xprob_prior_lshs)
+```
+
+### Signal Expectation: Auditory Prior x Auditory Perturbation x Hallucination Proneness
+
+```{r}
+ef_xprob_3way = emmeans(bmm.hgf.xprob, ~ fam * musicvivid * lshs,
+                        at = list(musicvivid = c(-0.5, 0.5),
+                                  lshs = c(-0.5, 0.5))) %>%
+  as.data.frame() %>%
+  mutate(
+    fam = factor(ifelse(fam < 0, "Weak Prior", "Strong Prior"),
+                 levels = c("Weak Prior", "Strong Prior")),
+    musicvivid = factor(ifelse(musicvivid < 0, "No\nImagery", "Music\nImagery"),
+                        levels = c("No\nImagery", "Music\nImagery")),
+    lshs = factor(ifelse(lshs < 0, "Low (-1SD)", "High (+1SD)"),
+                  levels = c("Low (-1SD)", "High (+1SD)"))
+  ) %>%
+  arrange(desc(lshs), musicvivid, fam) %>%
+  mutate(Prior = factor(ifelse(fam == "Strong Prior", "Strong", "Weak"), levels = c("Strong", "Weak")),
+         Perturbation = factor(ifelse(musicvivid == "Music\nImagery", "Imagery", "No Imagery"), levels = c("No Imagery", "Imagery")),
+         Hallucination_Proneness = lshs) %>%
+  dplyr::select(Prior, Perturbation, Hallucination_Proneness, Signal_Expectation = emmean, Lower_HPD = lower.HPD, Upper_HPD = upper.HPD)
+
+ef_xprob_3way %>%
+  kbl(digits = 2, caption = "$\\hat{\\mu}_{xprob}$: Estimated Marginal Means by Auditory Prior x Auditory Perturbation x Hallucination Proneness") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+
+contrast_xprob_prior = contrast(emmeans(bmm.hgf.xprob, ~ fam | musicvivid * lshs, at = list(musicvivid = c(-0.5, 0.5), lshs = c(-0.5, 0.5))), method = list("Strong - Weak" = c(-1, 1))) %>%
+  as.data.frame() %>%
+  mutate(Perturbation = ifelse(musicvivid > 0, "Imagery", "No Imagery"), Hallucination_Proneness = ifelse(lshs > 0, "High (+1SD)", "Low (-1SD)")) %>%
+  dplyr::select(Perturbation, Hallucination_Proneness, contrast, estimate, lower.HPD, upper.HPD)
+
+write.csv(ef_xprob_3way, "results/tables/exp1_emmeans_xprob_prior_x_perturbation_x_hallucination_proneness.csv", row.names = FALSE)
+write.csv(contrast_xprob_prior, "results/tables/exp1_contrasts_xprob_prior_by_perturbation_x_hallucination_proneness.csv", row.names = FALSE)
+```
+
+```{r}
+xprob_3way_slopes = emtrends(bmm.hgf.xprob, ~ fam * lshs, var = "musicvivid",
+                             at = list(fam = c(-0.5, 0.5),
+                                       lshs = c(-0.5, 0.5))) %>%
+  as.data.frame() %>%
+  mutate(
+    Prior = factor(ifelse(fam < 0, "Weak Prior", "Strong Prior"),
+                   levels = c("Weak Prior", "Strong Prior")),
+    Hallucination_Proneness = factor(ifelse(lshs < 0, "Lower Proneness (-1SD)", "Higher Proneness (+1SD)"),
+                                     levels = c("Lower Proneness (-1SD)", "Higher Proneness (+1SD)"))
+  ) %>%
+  dplyr::select(Prior, Hallucination_Proneness, musicvivid.trend, lower.HPD, upper.HPD)
+
+xprob_3way_slopes %>%
+  kbl(digits = 3, col.names = c("Auditory Prior", "Hallucination Proneness", "Slope", "Lower HPD", "Upper HPD"),
+      caption = "$\\hat{\\mu}_{xprob}$: Auditory Perturbation Slopes at Each Auditory Prior x Hallucination Proneness Cell") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = FALSE) %>%
+  row_spec(0, bold = TRUE)
+
+write.csv(xprob_3way_slopes, "results/tables/exp1_slopes_xprob_perturbation_by_prior_x_hallucination_proneness.csv", row.names = FALSE)
+```
+
+```{r, fig.width=8, fig.height=4}
+p_xprob_hl = ggplot(ef_xprob_3way, aes(x = Perturbation, y = Signal_Expectation,
+                                       colour = Prior, group = Prior)) +
+  geom_hline(yintercept = 0, linetype = "dotted", colour = "grey65", linewidth = 0.3) +
+  geom_line(linewidth = 0.7, position = prior_position) +
+  geom_linerange(aes(ymin = Lower_HPD, ymax = Upper_HPD), linewidth = 0.5,
+                 position = prior_position) +
+  geom_point(size = 2, position = prior_position) +
+  facet_wrap(~ Hallucination_Proneness, nrow = 1) +
+  scale_colour_manual(values = c("Weak" = "#82B3D1", "Strong" = "#264E70"), limits = c("Strong", "Weak")) +
+  theme_paper() +
+  labs(title = "Signal Expectation", x = "Auditory Perturbation",
+       y = expression(hat(mu)[xprob] * " (z)"), colour = "Auditory\nPrior")
+
+print(p_xprob_hl)
+```
+
+# 10. Manuscript Figure
+
+```{r, fig.width=8, fig.height=8}
+fig3 = ggarrange(
+  p_crit_hl, p_xprob_hl,
+  nrow = 2, ncol = 1, labels = c("A", "B"),
+  font.label = list(size = 10, face = "bold"), align = "hv",
+  common.legend = TRUE, legend = "bottom"
+)
+fig3
+
+ggsave("results/figures/figure_3_exp1.png",
+       plot = fig3, width = 16, height = 18, units = "cm", dpi = 300, bg = "white")
+ggsave("results/figures/figure_3_exp1.pdf",
+       plot = fig3, width = 16, height = 18, units = "cm", bg = "white")
+
+```
+
+# 11. Session Info
+
+```{r}
+sessionInfo()
+```

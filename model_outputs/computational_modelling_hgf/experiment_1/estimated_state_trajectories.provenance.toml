@@ -1,0 +1,13 @@
+experiment = 1
+julia_version = "1.12.6"
+extraction = "in-run observed-response replay in fitted-likelihood order"
+summary = "posterior median across all retained draws"
+samples_per_chain = 1000
+chains = 4
+draws_per_cell = 4000
+cells = 100
+rows = 11050
+input_sha256 = "a675be8121debd424fc73188cf86e78ec5895c732b521092312ca26d10b20e28"
+chains_sha256 = "d3e87f6b9a6c6d76227177c86f67bc1c186aedd43f40e65fd4526fc328d36d34"
+parameter_estimates_sha256 = "71a56a964184bca6ee2a50c901266b0cce8f0475217b1745602c6e1fc6ddcc29"
+output_sha256 = "c8a11581d77ff2ecf7003389200918352935e99655c0b5da9df3260cf2119abf"

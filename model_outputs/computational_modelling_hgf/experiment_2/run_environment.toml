@@ -1,0 +1,24 @@
+julia_version = "1.12.6"
+kernel = "Linux"
+architecture = "x86_64"
+machine = "x86_64-linux-gnu"
+cpu_threads = 14
+julia_threads = 1
+intended_chains = 4
+project_file = "04_analysis_code/02_hgf/Project.toml"
+project_sha256 = "fefbd7268fc0c74ba34206edacb878a6f29188a4c028c4bb205d231a99a8d019"
+manifest_file = "04_analysis_code/02_hgf/Manifest.toml"
+manifest_sha256 = "51009b25e83996dd2ccb23ad0340fe69221aef298ce993092b7a850638700dc3"
+
+[direct_packages]
+"ActionModels" = "0.6.6"
+"CSV" = "0.10.16"
+"DataFrames" = "1.8.2"
+"Distributions" = "0.25.125"
+"HDF5" = "0.17.3"
+"HierarchicalGaussianFiltering" = "0.6.2"
+"LogExpFunctions" = "0.3.29"
+"MCMCChains" = "6.0.7"
+"MCMCChainsStorage" = "0.1.4"
+"ReverseDiff" = "1.16.2"
+"Turing" = "0.34.1"

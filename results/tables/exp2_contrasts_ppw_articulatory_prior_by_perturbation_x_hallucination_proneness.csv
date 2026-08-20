@@ -1,0 +1,7 @@
+"Perturbation","Hallucination_Proneness","contrast","estimate","lower.HPD","upper.HPD"
+"Art. Suppression","Lower Proneness (-1SD)","Self-Voice - Distorted",0.46952610605925,0.1030109357827,0.812763478275
+"None","Lower Proneness (-1SD)","Self-Voice - Distorted",-0.0646543257679,-0.41473743616862,0.2844345106896
+"Foot-Tapping","Lower Proneness (-1SD)","Self-Voice - Distorted",0.1481596907289,-0.187070933904,0.5258510087915
+"Art. Suppression","Higher Proneness (+1SD)","Self-Voice - Distorted",-0.41012824750035,-0.7323934856151,-0.04804662523585
+"None","Higher Proneness (+1SD)","Self-Voice - Distorted",-0.0822484091683,-0.4506481479305,0.2586032049334
+"Foot-Tapping","Higher Proneness (+1SD)","Self-Voice - Distorted",-0.582456294715275,-0.9326434949934,-0.2315238997578

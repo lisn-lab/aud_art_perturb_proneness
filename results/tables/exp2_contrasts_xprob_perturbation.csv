@@ -1,0 +1,13 @@
+"Self_Voice","Hallucination_Proneness","contrast","estimate","lower.HPD","upper.HPD"
+"Distorted","Lower Proneness (-1SD)","FT - AS",0.13820118315,0.012580379515,0.2621936555
+"Distorted","Lower Proneness (-1SD)","None - AS",0.32460994975,0.1329061275,0.5057289205
+"Distorted","Lower Proneness (-1SD)","FT - None",-0.18750862565,-0.41679246925,0.037638326
+"Self-Voice","Lower Proneness (-1SD)","FT - AS",0.160902353,0.0384816666,0.28458382375
+"Self-Voice","Lower Proneness (-1SD)","None - AS",0.14708352125,-0.0419814565,0.3307609223
+"Self-Voice","Lower Proneness (-1SD)","FT - None",0.0131548213325,-0.2092336295,0.245288253
+"Distorted","Higher Proneness (+1SD)","FT - AS",0.1914690923,0.06453663975,0.3129147124
+"Distorted","Higher Proneness (+1SD)","None - AS",0.517570215,0.33143954335,0.7063520965
+"Distorted","Higher Proneness (+1SD)","FT - None",-0.32624681925,-0.54467441003,-0.098530255
+"Self-Voice","Higher Proneness (+1SD)","FT - AS",0.151059310125,0.020924743,0.27014364375
+"Self-Voice","Higher Proneness (+1SD)","None - AS",0.440033973375,0.252090131,0.628798605
+"Self-Voice","Higher Proneness (+1SD)","FT - None",-0.2895313375,-0.50835436932,-0.06301628685
