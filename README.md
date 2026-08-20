@@ -1,8 +1,8 @@
 # Motor-auditory priors and hallucination proneness
 
-This reproducibility package contains the de-identified analysis data, analysis
-scripts, fitted model objects, and generated results for two within-subject
-experiments.
+This repository accompanies a study of how hallucination proneness relates to the use of auditory and articulatory predictions during ambiguous speech perception. Experiment 1 combined speech-in-noise detection with involuntary musical imagery; Experiment 2 compared self-voice and pitch-shifted voice detection during articulatory suppression and a foot-tapping motor control. The study used Signal Detection Theory, Bayesian multilevel models, and the Hierarchical Gaussian Filter to distinguish perceptual sensitivity, response bias, and belief updating.
+
+This GitHub repository contains the de-identified analysis data, analysis scripts, fitted model objects, and generated results for the two within-subject experiments.
 
 ## Contents
 
@@ -17,18 +17,14 @@ experiments.
 
 ## Reproduce the reported tables and figures
 
-The R environment is locked to R 4.4.1 and the package versions in
-`renv.lock`. From the project root, run this once before opening or rendering
-the reports:
+The R environment is locked to R 4.4.1 and the package versions in `renv.lock`. From the project root, run this once before opening or rendering the reports:
 
 ```r
 install.packages("renv")
 renv::restore()
 ```
 
-`renv::restore()` is intentionally not called inside either report because it
-installs packages and changes the local library. Each report checks its required
-packages and stops with a clear restore instruction if any are unavailable.
+`renv::restore()` is intentionally not called inside either report because it installs packages and changes the local library. Each report checks its required packages and stops with a clear restore instruction if any are unavailable.
 
 Then render the reports from a fresh R process:
 
@@ -37,17 +33,6 @@ rmarkdown::render("analysis_scripts/statistical_modelling/experiment_1/analysis.
 rmarkdown::render("analysis_scripts/statistical_modelling/experiment_2/analysis.Rmd")
 ```
 
-The HTML reports are written beside their R Markdown sources. Tables and figures
-are written to `results`. Both reports end with `sessionInfo()`.
+The HTML reports are written beside their R Markdown sources. Tables and figures are written to `results`. Both reports end with `sessionInfo()`.
 
-The saved model objects are included because the ordinary report runs load them;
-the computationally expensive fitting chunks are disabled. Instructions for a
-full HGF refit are in `analysis_scripts/computational_modelling_hgf/README.md`.
-
-## Archive
-
-The public snapshot is deposited directly in Zenodo. The final record supplies
-the DOI and licence metadata; no generated release directory is required inside
-the working project. Include `writeup` when sharing the manuscript sources; it
-is organised as a public folder but can be omitted from a data-and-code-only
-deposit.
+The saved model objects are included because the ordinary report runs load them; the computationally expensive fitting chunks are disabled. Instructions for a full HGF refit are in `analysis_scripts/computational_modelling_hgf/README.md`.
